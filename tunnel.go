@@ -16,11 +16,11 @@ type State int
 
 const (
 	Connected State = iota
-	Close
+	Closed
 )
 
 type Tunnel struct {
-	ID         int
+	ID         uint32
 	localAddr  net.Addr
 	remoteAddr net.Addr
 	reciver    chan []byte
@@ -30,7 +30,7 @@ type Tunnel struct {
 	writer     io.WriteCloser
 }
 
-func NewTunnel(id int, conn net.Conn, writer io.WriteCloser) *Tunnel {
+func NewTunnel(id uint32, writer io.WriteCloser) *Tunnel {
 	return &Tunnel{
 		ID:       id,
 		leftover: make([]byte, 0),
@@ -52,7 +52,7 @@ func (t *Tunnel) Read(buf []byte) (int, error) {
 		return 0, errors.New("buf is nil")
 	}
 	if len(t.leftover) == 0 {
-		if t.state == Close {
+		if t.state == Closed {
 			return 0, io.EOF
 		}
 		new := <-t.reciver
@@ -77,7 +77,7 @@ func (t *Tunnel) Write(b []byte) (n int, err error) {
 // Close closes the connection.
 // Any blocked Read or Write operations will be unblocked and return errors.
 func (t *Tunnel) Close() error {
-	t.state = Close
+	t.state = Closed
 	return t.writer.Close()
 }
 
