@@ -36,6 +36,7 @@ func NewTunnel(id uint32, writer io.WriteCloser) *Tunnel {
 		leftover: make([]byte, 0),
 		reciver:  make(chan []byte, defaultBufferSize),
 		writer:   writer,
+		state:    Connected,
 	}
 }
 
@@ -74,11 +75,18 @@ func (t *Tunnel) Write(b []byte) (n int, err error) {
 	return t.writer.Write(b)
 }
 
+func (t *Tunnel) RemoteClose() {
+	t.state = Closed
+}
+
 // Close closes the connection.
 // Any blocked Read or Write operations will be unblocked and return errors.
 func (t *Tunnel) Close() error {
-	t.state = Closed
-	return t.writer.Close()
+	if t.state != Closed {
+		t.state = Closed
+		return t.writer.Close()
+	}
+	return nil
 }
 
 // LocalAddr returns the local network address.
