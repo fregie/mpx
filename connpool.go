@@ -6,12 +6,15 @@ import (
 	"log"
 	"math/rand"
 	"net"
+	"os"
 	"sync"
 	"time"
 )
 
 var (
 	MaxCachedNum = 1024
+	// Debug        = log.New(ioutil.Discard, "[MPX Debug] ", log.Ldate|log.Ltime|log.Lshortfile)
+	Debug = log.New(os.Stdout, "[MPX Debug] ", log.Ldate|log.Ltime|log.Lshortfile)
 )
 
 type Dialer interface {
@@ -29,9 +32,11 @@ type TunnInfo struct {
 	unInputed      sync.Map // key: seq, value: *packet
 	unInputedCount int
 	maxCachedNum   int
+	closeAt        uint32
 }
 
 func (t *TunnInfo) receiveData(p *Packet) {
+	Debug.Printf("input seq[%d]", p.Seq)
 	t.input(p.Data)
 	t.Ack += p.Length
 }
@@ -41,6 +46,7 @@ func (t *TunnInfo) cache(packet *Packet) (needRST bool) {
 	if loaded {
 		return true
 	}
+	Debug.Printf("cache seq[%d]", packet.Seq)
 	t.unInputedCount++
 	if t.unInputedCount >= t.maxCachedNum {
 		return true
@@ -49,32 +55,41 @@ func (t *TunnInfo) cache(packet *Packet) (needRST bool) {
 }
 
 func (t *TunnInfo) removeCached(seq uint32) {
+	Debug.Printf("remove cache seq[%d]", seq)
 	t.unInputed.Delete(seq)
 	t.unInputedCount--
 }
 
-func (t *TunnInfo) update() {
+func (t *TunnInfo) update() (needDelete bool) {
 	for {
 		p, ok := t.unInputed.Load(t.Ack)
 		if ok && p != nil {
+			Debug.Printf("load cahce seq[%d]", t.Ack)
 			packet := p.(*Packet)
 			t.removeCached(t.Ack)
 			t.receiveData(packet)
+			if t.closeAt != 0 && t.Ack == t.closeAt {
+				Debug.Printf("Close at %d", t.Tunnel.ID)
+				t.RemoteClose()
+				return true
+			}
 		} else {
 			break
 		}
 	}
+	return false
 }
 
 type ConnPool struct {
-	connMap  sync.Map // key: int , value: net.conn
-	IDs      []int
-	idMutex  sync.Mutex
-	tunnMap  sync.Map // key: int , value: Tunnel
-	sendCh   chan []byte
-	closeCh  chan uint32
-	acceptCh chan *Tunnel
-	dialer   Dialer
+	connMap     sync.Map // key: int , value: net.conn
+	packetMutex sync.Mutex
+	IDs         []int
+	idMutex     sync.Mutex
+	tunnMap     sync.Map // key: int , value: Tunnel
+	sendCh      chan []byte
+	closeCh     chan uint32
+	acceptCh    chan *Tunnel
+	dialer      Dialer
 }
 
 func NewConnPool() *ConnPool {
@@ -122,9 +137,14 @@ func (p *ConnPool) AddConn(conn net.Conn) error {
 	if conn == nil {
 		return errors.New("Conn is nil")
 	}
-	p.connMap.Store(len(p.IDs)+1, conn)
+	connID := rand.Intn(65535)
+	for v, ok := p.connMap.Load(connID); ok && v != nil; {
+		connID = rand.Intn(65535)
+	}
+	p.connMap.Store(connID, conn)
 	p.updateIDs()
-	go p.handleConn(conn)
+	go p.handleConn(conn, connID)
+	log.Printf("Add connection [%d]", connID)
 
 	return nil
 }
@@ -139,57 +159,59 @@ func (p *ConnPool) updateIDs() {
 	})
 }
 
-func (p *ConnPool) handleConn(conn net.Conn) {
-	defer conn.Close()
+func (p *ConnPool) handleConn(conn net.Conn, id int) {
+	defer func() {
+		conn.Close()
+		p.connMap.Delete(id)
+		p.updateIDs()
+	}()
 	for {
 		packet, err := PacketFromReader(conn)
 		if err != nil {
 			log.Printf("read err:%s", err)
 			break
 		}
-		switch packet.Type {
-		case Connect:
-			tunn, ok := p.tunnMap.Load(packet.TunnID)
-			if ok && tunn != nil {
-				_, err := p.Send(NewRSTPacket(packet.TunnID, nil).Pack())
-				if err != nil {
-					log.Printf("send packet failed: %s", err)
-				}
-				continue
-			}
+		p.packetMutex.Lock()
+		Debug.Printf("receive: seq[%d]", packet.Seq)
+		var tunn *TunnInfo
+		tunnel, ok := p.tunnMap.Load(packet.TunnID)
+		if !ok || tunnel == nil {
+			Debug.Printf("New tunn")
 			newTunn := NewTunnel(packet.TunnID, &TunnelWriter{
 				TunnID: packet.TunnID,
 				Seq:    0,
 				sendCh: p.sendCh,
 			})
-			p.tunnMap.Store(newTunn.ID, &TunnInfo{Tunnel: newTunn, Ack: uint32(len(packet.Data)), maxCachedNum: MaxCachedNum})
+			ti := &TunnInfo{Tunnel: newTunn, Ack: 0, maxCachedNum: MaxCachedNum}
+			p.tunnMap.Store(newTunn.ID, ti)
 			p.acceptCh <- newTunn
-			newTunn.input(packet.Data)
+			tunn = ti
+		} else {
+			tunn = tunnel.(*TunnInfo)
+		}
+		switch packet.Type {
+		case Connect:
+			if len(packet.Data) > 0 {
+				tunn.receiveData(packet)
+			}
 		case Disconnect:
-			tunninf, ok := p.tunnMap.Load(packet.TunnID)
-			if !ok || tunninf == nil {
-				log.Printf("tunnel[%d] to disconnect is not exist", packet.TunnID)
-				continue
+			if packet.Seq == tunn.Ack {
+				Debug.Printf("Close %d", tunn.ID)
+				tunn.RemoteClose()
+				p.tunnMap.Delete(tunn.ID)
+				goto CONTINUE
 			}
-			tunn := tunninf.(*TunnInfo)
-			tunn.RemoteClose()
-			p.tunnMap.Delete(tunn.ID)
+			tunn.closeAt = packet.Seq
 		case Data:
-			tunninf, ok := p.tunnMap.Load(packet.TunnID)
-			if !ok || tunninf == nil {
-				_, err := p.Send(NewRSTPacket(packet.TunnID, nil).Pack())
-				if err != nil {
-					log.Printf("send packet failed: %s", err)
-				}
-				continue
-			}
-			tunn := tunninf.(*TunnInfo)
 			if packet.Seq == tunn.Ack {
 				tunn.receiveData(packet)
 				if tunn.unInputedCount > 0 {
-					tunn.update()
+					needDelete := tunn.update()
+					if needDelete {
+						p.tunnMap.Delete(tunn.ID)
+					}
 				}
-				continue
+				goto CONTINUE
 			}
 			needRST := tunn.cache(packet)
 			if needRST {
@@ -197,9 +219,11 @@ func (p *ConnPool) handleConn(conn net.Conn) {
 				if err != nil {
 					log.Printf("send packet failed: %s", err)
 				}
-				continue
+				goto CONTINUE
 			}
 		}
+	CONTINUE:
+		p.packetMutex.Unlock()
 	}
 }
 
@@ -219,6 +243,7 @@ func (p *ConnPool) Serve(lis net.Listener) error {
 }
 
 func (p *ConnPool) StartWithDialer(dialer Dialer, connNum int) (stop func()) {
+	go p.Writer()
 	done := make(chan bool)
 	wg := sync.WaitGroup{}
 	for i := 0; i < connNum; i++ {
@@ -232,6 +257,7 @@ func (p *ConnPool) StartWithDialer(dialer Dialer, connNum int) (stop func()) {
 			if err != nil {
 				log.Printf("AddConn failed: %s", err)
 			}
+			wg.Done()
 		}()
 	}
 	wg.Wait()
@@ -296,28 +322,35 @@ type TunnelWriter struct {
 	closeCh chan uint32
 }
 
-func (t TunnelWriter) Write(data []byte) (n int, err error) {
+func (tw *TunnelWriter) Write(data []byte) (n int, err error) {
 	packet := &Packet{
 		Type:   Data,
-		TunnID: t.TunnID,
-		Seq:    t.Seq,
+		TunnID: tw.TunnID,
+		Seq:    tw.Seq,
 		Length: uint32(len(data)),
 		Data:   make([]byte, len(data)),
 	}
-	t.sendCh <- packet.Pack()
-	t.Seq += packet.Length
+	if packet.Length > 0 {
+		copy(packet.Data, data)
+	}
+	tw.sendCh <- packet.Pack()
+	tw.Seq = tw.Seq + packet.Length
 	return len(data), nil
 }
 
-func (t TunnelWriter) Close() error {
+func (tw *TunnelWriter) Close() error {
 	packet := &Packet{
 		Type:   Disconnect,
-		TunnID: t.TunnID,
-		Seq:    t.Seq,
+		TunnID: tw.TunnID,
+		Seq:    tw.Seq,
 		Length: 0,
 		Data:   make([]byte, 0),
 	}
-	t.sendCh <- packet.Pack()
-	t.closeCh <- t.TunnID
+	tw.sendCh <- packet.Pack()
+	tw.closeCh <- tw.TunnID
 	return nil
+}
+
+func init() {
+	rand.Seed(time.Now().Unix())
 }

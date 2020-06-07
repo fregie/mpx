@@ -50,6 +50,7 @@ func (p *Packet) Pack() []byte {
 func PacketFromReader(r io.Reader) (*Packet, error) {
 	headerBuf := make([]byte, HeaderSize)
 	_, err := io.ReadFull(r, headerBuf)
+
 	if err != nil {
 		return nil, err
 	}

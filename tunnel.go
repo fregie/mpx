@@ -3,6 +3,7 @@ package mpx
 import (
 	"errors"
 	"io"
+	"log"
 	"net"
 	"sync"
 	"time"
@@ -34,7 +35,7 @@ func NewTunnel(id uint32, writer io.WriteCloser) *Tunnel {
 	return &Tunnel{
 		ID:       id,
 		leftover: make([]byte, 0),
-		reciver:  make(chan []byte, defaultBufferSize),
+		reciver:  make(chan []byte),
 		writer:   writer,
 		state:    Connected,
 	}
@@ -54,6 +55,7 @@ func (t *Tunnel) Read(buf []byte) (int, error) {
 	}
 	if len(t.leftover) == 0 {
 		if t.state == Closed {
+			log.Printf("Closed")
 			return 0, io.EOF
 		}
 		new := <-t.reciver
