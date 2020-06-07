@@ -36,7 +36,7 @@ type TunnInfo struct {
 }
 
 func (t *TunnInfo) receiveData(p *Packet) {
-	Debug.Printf("input seq[%d]", p.Seq)
+	Debug.Printf("[%d] input seq[%d]", t.ID, p.Seq)
 	t.input(p.Data)
 	t.Ack += p.Length
 }
@@ -46,7 +46,7 @@ func (t *TunnInfo) cache(packet *Packet) (needRST bool) {
 	if loaded {
 		return true
 	}
-	Debug.Printf("cache seq[%d]", packet.Seq)
+	Debug.Printf("[%d] cache seq[%d]", t.ID, packet.Seq)
 	t.unInputedCount++
 	if t.unInputedCount >= t.maxCachedNum {
 		return true
@@ -55,7 +55,7 @@ func (t *TunnInfo) cache(packet *Packet) (needRST bool) {
 }
 
 func (t *TunnInfo) removeCached(seq uint32) {
-	Debug.Printf("remove cache seq[%d]", seq)
+	Debug.Printf("[%d] remove cache seq[%d]", t.ID, seq)
 	t.unInputed.Delete(seq)
 	t.unInputedCount--
 }
@@ -64,7 +64,7 @@ func (t *TunnInfo) update() (needDelete bool) {
 	for {
 		p, ok := t.unInputed.Load(t.Ack)
 		if ok && p != nil {
-			Debug.Printf("load cahce seq[%d]", t.Ack)
+			Debug.Printf("[%d] load cahce seq[%d]", t.ID, t.Ack)
 			packet := p.(*Packet)
 			t.removeCached(t.Ack)
 			t.receiveData(packet)
@@ -172,7 +172,7 @@ func (p *ConnPool) handleConn(conn net.Conn, id int) {
 			break
 		}
 		p.packetMutex.Lock()
-		Debug.Printf("receive: seq[%d]", packet.Seq)
+		Debug.Printf("[%d] receive: seq[%d]", packet.TunnID, packet.Seq)
 		var tunn *TunnInfo
 		tunnel, ok := p.tunnMap.Load(packet.TunnID)
 		if !ok || tunnel == nil {
@@ -193,6 +193,12 @@ func (p *ConnPool) handleConn(conn net.Conn, id int) {
 		case Connect:
 			if len(packet.Data) > 0 {
 				tunn.receiveData(packet)
+				if tunn.unInputedCount > 0 {
+					needDelete := tunn.update()
+					if needDelete {
+						p.tunnMap.Delete(tunn.ID)
+					}
+				}
 			}
 		case Disconnect:
 			if packet.Seq == tunn.Ack {
