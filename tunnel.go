@@ -25,6 +25,7 @@ type Tunnel struct {
 	localAddr  net.Addr
 	remoteAddr net.Addr
 	reciver    chan []byte
+	closeCh    chan bool
 	leftover   []byte
 	state      State
 	readMutex  sync.Mutex
@@ -36,15 +37,16 @@ func NewTunnel(id uint32, writer io.WriteCloser) *Tunnel {
 		ID:       id,
 		leftover: make([]byte, 0),
 		reciver:  make(chan []byte),
+		closeCh:  make(chan bool),
 		writer:   writer,
 		state:    Connected,
 	}
 }
 
 func (t *Tunnel) input(data []byte) {
-	newBuffer := make([]byte, len(data))
-	copy(newBuffer, data)
-	t.reciver <- newBuffer
+	// newBuffer := make([]byte, len(data))
+	// copy(newBuffer, data)
+	t.reciver <- data
 }
 
 func (t *Tunnel) Read(buf []byte) (int, error) {
@@ -54,14 +56,18 @@ func (t *Tunnel) Read(buf []byte) (int, error) {
 		return 0, errors.New("buf is nil")
 	}
 	if len(t.leftover) == 0 {
-		if t.state == Closed {
-			log.Printf("Closed")
-			return 0, io.EOF
+		select {
+		case new := <-t.reciver:
+			n := copy(buf, new)
+			t.leftover = new[n:]
+			return n, nil
+		case close := <-t.closeCh:
+			if close {
+				log.Printf("Closed")
+				return 0, io.EOF
+			}
 		}
-		new := <-t.reciver
-		n := copy(buf, new)
-		t.leftover = new[n:]
-		return n, nil
+
 	}
 
 	n := copy(buf, t.leftover)
@@ -79,6 +85,7 @@ func (t *Tunnel) Write(b []byte) (n int, err error) {
 
 func (t *Tunnel) RemoteClose() {
 	t.state = Closed
+	t.closeCh <- true
 }
 
 // Close closes the connection.

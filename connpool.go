@@ -12,7 +12,7 @@ import (
 )
 
 var (
-	MaxCachedNum = 1024
+	MaxCachedNum = 65535
 	// Debug        = log.New(ioutil.Discard, "[MPX Debug] ", log.Ldate|log.Ltime|log.Lshortfile)
 	Debug = log.New(os.Stdout, "[MPX Debug] ", log.Ldate|log.Ltime|log.Lshortfile)
 )
@@ -36,7 +36,7 @@ type TunnInfo struct {
 }
 
 func (t *TunnInfo) receiveData(p *Packet) {
-	Debug.Printf("[%d] input seq[%d]", t.ID, p.Seq)
+	// Debug.Printf("[%d] input seq[%d]", t.ID, p.Seq)
 	t.input(p.Data)
 	t.Ack += p.Length
 }
@@ -46,7 +46,7 @@ func (t *TunnInfo) cache(packet *Packet) (needRST bool) {
 	if loaded {
 		return true
 	}
-	Debug.Printf("[%d] cache seq[%d]", t.ID, packet.Seq)
+	// Debug.Printf("[%d] cache seq[%d]", t.ID, packet.Seq)
 	t.unInputedCount++
 	if t.unInputedCount >= t.maxCachedNum {
 		return true
@@ -55,7 +55,7 @@ func (t *TunnInfo) cache(packet *Packet) (needRST bool) {
 }
 
 func (t *TunnInfo) removeCached(seq uint32) {
-	Debug.Printf("[%d] remove cache seq[%d]", t.ID, seq)
+	// Debug.Printf("[%d] remove cache seq[%d]", t.ID, seq)
 	t.unInputed.Delete(seq)
 	t.unInputedCount--
 }
@@ -64,7 +64,7 @@ func (t *TunnInfo) update() (needDelete bool) {
 	for {
 		p, ok := t.unInputed.Load(t.Ack)
 		if ok && p != nil {
-			Debug.Printf("[%d] load cahce seq[%d]", t.ID, t.Ack)
+			// Debug.Printf("[%d] load cahce seq[%d]", t.ID, t.Ack)
 			packet := p.(*Packet)
 			t.removeCached(t.Ack)
 			t.receiveData(packet)
@@ -172,7 +172,7 @@ func (p *ConnPool) handleConn(conn net.Conn, id int) {
 			break
 		}
 		p.packetMutex.Lock()
-		Debug.Printf("[%d] receive: seq[%d]", packet.TunnID, packet.Seq)
+		// Debug.Printf("[%d] receive: seq[%d]", packet.TunnID, packet.Seq)
 		var tunn *TunnInfo
 		tunnel, ok := p.tunnMap.Load(packet.TunnID)
 		if !ok || tunnel == nil {
@@ -329,6 +329,7 @@ type TunnelWriter struct {
 }
 
 func (tw *TunnelWriter) Write(data []byte) (n int, err error) {
+	// Debug.Print(string(data))
 	packet := &Packet{
 		Type:   Data,
 		TunnID: tw.TunnID,

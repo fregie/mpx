@@ -1,47 +1,41 @@
 package main
 
 import (
-	"io"
 	"log"
 	"time"
 
 	"github.com/fregie/mpx"
 	"github.com/fregie/mpx/dialer"
+
+	"net/http"
+	_ "net/http/pprof"
 )
 
 func main() {
+	go http.ListenAndServe("0.0.0.0:8083", nil)
+	time.Sleep(5 * time.Second)
 	dialer := &dialer.TCPDialer{RemoteAddr: "127.0.0.1:5512"}
 	cp := mpx.NewConnPool()
 	cp.StartWithDialer(dialer, 5)
-	tunn, err := cp.Connect([]byte("Hello mpx !"))
+	tunn, err := cp.Connect(nil)
 	if err != nil {
 		log.Fatal(err)
 	}
-	tunn.Write([]byte("Hello mpx2 !"))
-	tunn.Write([]byte("Hello mpx3 !"))
-	tunn.Write([]byte("Hello mpx4 !"))
 
-	tunn2, err := cp.Connect([]byte("Hello2 mpx !"))
-	if err != nil {
-		log.Fatal(err)
-	}
-	tunn2.Write([]byte("Hello2 mpx2 !"))
-	tunn2.Write([]byte("Hello2 mpx3 !"))
-	tunn2.Write([]byte("Hello2 mpx4 !"))
-
-	buffer := make([]byte, 10000)
+	// io.Copy(tunn, file)
+	size := 0
+	buffer := make([]byte, 1400)
 	for {
-		n, err := tunn.Read(buffer)
-		if err != nil {
-			if err == io.EOF {
-				return
-			}
-			log.Printf("read: %s", err)
-			return
+		if size >= 1024*1024*1024 {
+			break
 		}
-		log.Printf("Receive: %s", string(buffer[:n]))
+		n, err := tunn.Write(buffer)
+		if err != nil {
+			log.Print(err)
+		}
+		size += n
 	}
 
-	// tunn.Close()
-	time.Sleep(600 * time.Second)
+	tunn.Close()
+	time.Sleep(60 * time.Second)
 }
