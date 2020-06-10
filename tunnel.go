@@ -6,6 +6,7 @@ import (
 	"log"
 	"net"
 	"sync"
+	"syscall"
 	"time"
 )
 
@@ -21,22 +22,24 @@ const (
 )
 
 type Tunnel struct {
-	ID         uint32
-	localAddr  net.Addr
-	remoteAddr net.Addr
-	reciver    chan []byte
-	closeCh    chan bool
-	leftover   []byte
-	state      State
-	readMutex  sync.Mutex
-	writer     io.WriteCloser
+	ID          uint32
+	localAddr   net.Addr
+	remoteAddr  net.Addr
+	reciver     chan []byte
+	closeCh     chan bool
+	leftover    []byte
+	state       State
+	readMutex   sync.Mutex
+	readChMutex sync.Mutex
+	isReading   bool
+	writer      io.WriteCloser
 }
 
 func NewTunnel(id uint32, writer io.WriteCloser) *Tunnel {
 	return &Tunnel{
 		ID:       id,
 		leftover: make([]byte, 0),
-		reciver:  make(chan []byte),
+		reciver:  make(chan []byte, defaultBufferSize),
 		closeCh:  make(chan bool),
 		writer:   writer,
 		state:    Connected,
@@ -46,25 +49,47 @@ func NewTunnel(id uint32, writer io.WriteCloser) *Tunnel {
 func (t *Tunnel) input(data []byte) {
 	// newBuffer := make([]byte, len(data))
 	// copy(newBuffer, data)
+	// t.readChMutex.Lock()
+	// defer t.readChMutex.Unlock()
+	// if t.state != Closed {
+	// 	if t.isReading {
 	t.reciver <- data
+	// } else {
+	// 	Debug.Printf("[%d]to leftover", t.ID)
+	// 	t.leftover = append(t.leftover, data...)
+	// }
+	// }
 }
 
 func (t *Tunnel) Read(buf []byte) (int, error) {
+	if t.state == Closed && len(t.leftover) == 0 && len(t.reciver) == 0 {
+		Debug.Printf("[%d]EOF", t.ID)
+		return 0, io.EOF
+	}
 	t.readMutex.Lock()
 	defer t.readMutex.Unlock()
+	t.isReading = true
+	defer func() { t.isReading = false }()
 	if buf == nil {
 		return 0, errors.New("buf is nil")
 	}
 	if len(t.leftover) == 0 {
 		select {
 		case new := <-t.reciver:
+			t.isReading = false
 			n := copy(buf, new)
 			t.leftover = new[n:]
 			return n, nil
 		case close := <-t.closeCh:
+			t.isReading = false
 			if close {
 				log.Printf("Closed")
-				return 0, io.EOF
+				if t.state == Closed {
+					Debug.Printf("[%d]EOF", t.ID)
+					return 0, io.EOF
+				} else {
+					return 0, syscall.ETIMEDOUT
+				}
 			}
 		}
 
@@ -83,9 +108,16 @@ func (t *Tunnel) Write(b []byte) (n int, err error) {
 	return t.writer.Write(b)
 }
 
+func (t *Tunnel) stopReading() {
+	t.readChMutex.Lock()
+	defer t.readChMutex.Unlock()
+	if t.isReading {
+		t.closeCh <- true
+	}
+}
+
 func (t *Tunnel) RemoteClose() {
 	t.state = Closed
-	t.closeCh <- true
 }
 
 // Close closes the connection.
@@ -93,6 +125,7 @@ func (t *Tunnel) RemoteClose() {
 func (t *Tunnel) Close() error {
 	if t.state != Closed {
 		t.state = Closed
+		t.stopReading()
 		return t.writer.Close()
 	}
 	return nil
@@ -131,6 +164,15 @@ func (t *Tunnel) RemoteAddr() net.Addr {
 // failure on I/O can be detected using
 // errors.Is(err, syscall.ETIMEDOUT).
 func (t *Tunnel) SetDeadline(ti time.Time) error {
+	log.Printf("set deadline")
+	err := t.SetReadDeadline(ti)
+	if err != nil {
+		return err
+	}
+	err = t.SetWriteDeadline(ti)
+	if err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -138,6 +180,14 @@ func (t *Tunnel) SetDeadline(ti time.Time) error {
 // and any currently-blocked Read call.
 // A zero value for t means Read will not time out.
 func (t *Tunnel) SetReadDeadline(ti time.Time) error {
+	now := time.Now()
+	if !ti.After(now) {
+		t.stopReading()
+	} else {
+		time.AfterFunc(ti.Sub(now), func() {
+			t.stopReading()
+		})
+	}
 	return nil
 }
 

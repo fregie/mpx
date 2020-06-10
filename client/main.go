@@ -2,40 +2,39 @@ package main
 
 import (
 	"log"
-	"time"
+	"net"
 
 	"github.com/fregie/mpx"
 	"github.com/fregie/mpx/dialer"
+	"github.com/shadowsocks/go-shadowsocks2/core"
 
 	"net/http"
 	_ "net/http/pprof"
 )
 
+type mpxConnecter struct {
+	*mpx.ConnPool
+}
+
+func (m *mpxConnecter) Connect() (net.Conn, error) { return m.ConnPool.Connect(nil) }
+func (m *mpxConnecter) ServerHost() string         { return "" }
+
 func main() {
 	go http.ListenAndServe("0.0.0.0:8083", nil)
-	time.Sleep(5 * time.Second)
-	dialer := &dialer.TCPDialer{RemoteAddr: "127.0.0.1:5512"}
-	cp := mpx.NewConnPool()
-	cp.StartWithDialer(dialer, 5)
-	tunn, err := cp.Connect(nil)
+
+	ciph, err := core.PickCipher("AES-256-GCM", []byte{}, "789632145")
 	if err != nil {
 		log.Fatal(err)
 	}
 
-	// io.Copy(tunn, file)
-	size := 0
-	buffer := make([]byte, 1400)
-	for {
-		if size >= 1024*1024*1024 {
-			break
-		}
-		n, err := tunn.Write(buffer)
-		if err != nil {
-			log.Print(err)
-		}
-		size += n
-	}
+	dialer := &dialer.TCPDialer{RemoteAddr: "45.77.142.97:5512"}
+	// dialer := &WSConnecter{ServerAddr: "line-test2.transocks.com.cn:80", URL: "/proxy"}
+	cp := mpx.NewConnPool()
+	cp.StartWithDialer(dialer, 5)
+	client := &Client{}
+	// connecter := &mpxConnecter{ConnPool: cp}
+	connecter := &TCPConnecter{ServerAddr: "45.77.142.97:5512"}
+	// connecter := &WSConnecter{ServerAddr: "line-test2.transocks.com.cn:80", URL: "/proxy"}
 
-	tunn.Close()
-	time.Sleep(60 * time.Second)
+	client.StartsocksConnLocal("127.0.0.1:1080", connecter, ciph.StreamConn)
 }
