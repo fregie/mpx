@@ -105,6 +105,9 @@ func (t *Tunnel) Read(buf []byte) (int, error) {
 // Write can be made to time out and return an Error with Timeout() == true
 // after a fixed time limit; see SetDeadline and SetWriteDeadline.
 func (t *Tunnel) Write(b []byte) (n int, err error) {
+	if t.state == Closed {
+		return 0, errors.New("closed")
+	}
 	return t.writer.Write(b)
 }
 

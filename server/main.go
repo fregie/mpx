@@ -19,7 +19,7 @@ import (
 func main() {
 	log.SetFlags(log.Ldate | log.Ltime | log.Lshortfile)
 	go http.ListenAndServe("0.0.0.0:8081", nil)
-	ciph, err := core.PickCipher("AES-256-GCM", []byte{}, "789632145")
+	ciph, err := core.PickCipher("aes-256-cfb", []byte{}, "q92H92qreL1MAu9u")
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -29,24 +29,24 @@ func main() {
 		log.Fatal(err)
 	}
 	cp := mpx.NewConnPool()
-	go cp.Serve(lis)
+	go cp.ServeWithListener(lis)
 	// log.Printf("Start at %s", lis.Addr().String())
 
 	httpHandle := http.NewServeMux()
-	httpHandle.HandleFunc("/proxy", handleConn)
-	// httpHandle.HandleFunc("/proxy", func(w http.ResponseWriter, r *http.Request) {
-	// 	wc, err := upgrader.Upgrade(w, r, nil)
-	// 	if err != nil {
-	// 		log.Print("upgrade:", err)
-	// 		return
-	// 	}
-	// 	cp.AddConn(wc.UnderlyingConn())
-	// })
+	// httpHandle.HandleFunc("/proxy", handleConn)
+	httpHandle.HandleFunc("/proxy", func(w http.ResponseWriter, r *http.Request) {
+		wc, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			log.Print("upgrade:", err)
+			return
+		}
+		cp.AddConn(wc.UnderlyingConn())
+	})
 	s := http.Server{Addr: "0.0.0.0:80", Handler: httpHandle}
 	go s.ListenAndServe()
 	for {
-		// tunn, err := cp.Accept()
-		tunn, err := lis.Accept()
+		tunn, err := cp.Accept()
+		// tunn, err := lis.Accept()
 		if err != nil {
 			log.Print(err)
 			continue

@@ -1,6 +1,7 @@
 package mpx
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"log"
@@ -9,6 +10,10 @@ import (
 	"os"
 	"sync"
 	"time"
+)
+
+var (
+	EClosed = errors.New("closed")
 )
 
 var (
@@ -90,31 +95,40 @@ const (
 )
 
 type ConnPool struct {
-	side        side
-	connMap     sync.Map // key: int , value: net.conn
-	packetMutex sync.Mutex
-	IDs         []int
-	idMutex     sync.Mutex
-	tunnMap     sync.Map // key: int , value: Tunnel
-	sendCh      chan []byte
-	closeCh     chan uint32
-	acceptCh    chan *Tunnel
-	dialer      Dialer
+	side      side
+	connMap   sync.Map // key: int , value: net.conn
+	IDs       []int
+	idMutex   sync.Mutex
+	tunnMap   sync.Map // key: int , value: Tunnel
+	sendCh    chan []byte
+	recvCh    chan *Packet
+	acceptCh  chan *Tunnel
+	running   bool
+	ctx       context.Context
+	ctxCancel context.CancelFunc
+	dialer    Dialer
 }
 
 func NewConnPool() *ConnPool {
+	ctx, cancel := context.WithCancel(context.Background())
 	p := &ConnPool{
-		IDs:      make([]int, 0),
-		sendCh:   make(chan []byte),
-		closeCh:  make(chan uint32),
-		acceptCh: make(chan *Tunnel),
+		IDs:       make([]int, 0),
+		sendCh:    make(chan []byte),
+		recvCh:    make(chan *Packet),
+		ctx:       ctx,
+		ctxCancel: cancel,
+		acceptCh:  make(chan *Tunnel),
 	}
 	return p
 }
 
 func (p *ConnPool) Accept() (*Tunnel, error) {
-	tunn := <-p.acceptCh
-	return tunn, nil
+	select {
+	case tunn := <-p.acceptCh:
+		return tunn, nil
+	case <-p.ctx.Done():
+		return nil, EClosed
+	}
 }
 
 func (p *ConnPool) Connect(data []byte) (*Tunnel, error) {
@@ -134,10 +148,9 @@ func (p *ConnPool) Connect(data []byte) (*Tunnel, error) {
 	}
 	p.sendCh <- packet.Pack()
 	tunn := NewTunnel(packet.TunnID, &TunnelWriter{
-		TunnID:  packet.TunnID,
-		Seq:     packet.Length,
-		sendCh:  p.sendCh,
-		closeCh: p.closeCh,
+		TunnID: packet.TunnID,
+		Seq:    packet.Length,
+		sendCh: p.sendCh,
 	})
 	p.tunnMap.Store(packet.TunnID, &TunnInfo{Tunnel: tunn, maxCachedNum: MaxCachedNum})
 	return tunn, nil
@@ -170,108 +183,154 @@ func (p *ConnPool) updateIDs() {
 }
 
 func (p *ConnPool) handleConn(conn net.Conn, id int) {
-	defer func() {
-		conn.Close()
-		p.connMap.Delete(id)
-		p.updateIDs()
+	go func() {
+		defer func() {
+			conn.Close()
+			p.connMap.Delete(id)
+			p.updateIDs()
+		}()
+		for {
+			packet, err := PacketFromReader(conn)
+			if err != nil {
+				log.Printf("read err:%s", err)
+				break
+			}
+			p.recvCh <- packet
+		}
 	}()
+	for range p.ctx.Done() {
+	}
+	conn.Close()
+}
+
+func (p *ConnPool) receiver() {
 	for {
-		packet, err := PacketFromReader(conn)
-		if err != nil {
-			log.Printf("read err:%s", err)
-			break
-		}
-		p.packetMutex.Lock()
-		Debug.Printf("[%d] receive: seq[%d]", packet.TunnID, packet.Seq)
-		var tunn *TunnInfo
-		tunnel, ok := p.tunnMap.Load(packet.TunnID)
-		if !ok || tunnel == nil {
-			if p.side == client {
-				Debug.Printf("[%d] drop deq[%d]", packet.TunnID, packet.Seq)
-				continue
+		select {
+		case <-p.ctx.Done():
+			for range p.recvCh { // 防止阻塞导致goroutin泄露
 			}
-			Debug.Printf("New tunn")
-			newTunn := NewTunnel(packet.TunnID, &TunnelWriter{
-				TunnID:  packet.TunnID,
-				Seq:     0,
-				sendCh:  p.sendCh,
-				closeCh: p.closeCh,
-			})
-			ti := &TunnInfo{Tunnel: newTunn, Ack: 0, maxCachedNum: MaxCachedNum}
-			p.tunnMap.Store(newTunn.ID, ti)
-			p.acceptCh <- newTunn
-			tunn = ti
-		} else {
-			tunn = tunnel.(*TunnInfo)
-		}
-		switch packet.Type {
-		case Connect:
-			if len(packet.Data) > 0 {
-				tunn.receiveData(packet)
-				if tunn.unInputedCount > 0 {
-					needDelete := tunn.update()
-					if needDelete {
-						Debug.Printf("[%d]Delete tunnel", tunn.ID)
-						p.tunnMap.Delete(tunn.ID)
+			return
+		case packet, ok := <-p.recvCh:
+			if !ok {
+				return
+			}
+			Debug.Printf("[%d] receive: seq[%d]", packet.TunnID, packet.Seq)
+			var tunn *TunnInfo
+			tunnel, ok := p.tunnMap.Load(packet.TunnID)
+			if !ok || tunnel == nil {
+				if p.side == client {
+					Debug.Printf("[%d] drop deq[%d]", packet.TunnID, packet.Seq)
+					continue
+				}
+				Debug.Printf("New tunn")
+				newTunn := NewTunnel(packet.TunnID, &TunnelWriter{
+					TunnID: packet.TunnID,
+					Seq:    0,
+					sendCh: p.sendCh,
+				})
+				ti := &TunnInfo{Tunnel: newTunn, Ack: 0, maxCachedNum: MaxCachedNum}
+				p.tunnMap.Store(newTunn.ID, ti)
+				p.acceptCh <- newTunn
+				tunn = ti
+			} else {
+				tunn = tunnel.(*TunnInfo)
+			}
+			switch packet.Type {
+			case Connect:
+				if len(packet.Data) > 0 {
+					tunn.receiveData(packet)
+					if tunn.unInputedCount > 0 {
+						needDelete := tunn.update()
+						if needDelete {
+							Debug.Printf("[%d]Delete tunnel", tunn.ID)
+							p.tunnMap.Delete(tunn.ID)
+						}
 					}
 				}
-			}
-		case Disconnect:
-			Debug.Printf("[%d]receive disconnect", packet.TunnID)
-			if packet.Seq == tunn.Ack {
-				Debug.Printf("Close %d", tunn.ID)
-				tunn.RemoteClose()
-				Debug.Printf("[%d]Delete tunnel", tunn.ID)
-				p.tunnMap.Delete(tunn.ID)
-				goto CONTINUE
-			}
-			tunn.closeAt = packet.Seq
-		case Data:
-			if packet.Seq == tunn.Ack {
-				tunn.receiveData(packet)
-				if tunn.unInputedCount > 0 {
-					needDelete := tunn.update()
-					if needDelete {
-						Debug.Printf("[%d]Delete tunnel", tunn.ID)
-						p.tunnMap.Delete(tunn.ID)
+			case Disconnect:
+				Debug.Printf("[%d]receive disconnect", packet.TunnID)
+				if packet.Seq == tunn.Ack {
+					Debug.Printf("Close %d", tunn.ID)
+					tunn.RemoteClose()
+					Debug.Printf("[%d]Delete tunnel", tunn.ID)
+					p.tunnMap.Delete(tunn.ID)
+					goto CONTINUE
+				}
+				tunn.closeAt = packet.Seq
+			case Data:
+				if packet.Seq == tunn.Ack {
+					tunn.receiveData(packet)
+					if tunn.unInputedCount > 0 {
+						needDelete := tunn.update()
+						if needDelete {
+							Debug.Printf("[%d]Delete tunnel", tunn.ID)
+							p.tunnMap.Delete(tunn.ID)
+						}
 					}
+					goto CONTINUE
 				}
-				goto CONTINUE
-			}
-			needRST := tunn.cache(packet)
-			if needRST {
-				_, err := p.Send(NewRSTPacket(packet.TunnID, nil).Pack())
-				if err != nil {
-					log.Printf("send packet failed: %s", err)
+				needRST := tunn.cache(packet)
+				if needRST {
+					_, err := p.Send(NewRSTPacket(packet.TunnID, nil).Pack())
+					if err != nil {
+						log.Printf("send packet failed: %s", err)
+					}
+					goto CONTINUE
 				}
-				goto CONTINUE
 			}
+		CONTINUE:
 		}
-	CONTINUE:
-		p.packetMutex.Unlock()
 	}
 }
 
-func (p *ConnPool) Serve(lis net.Listener) error {
+func (p *ConnPool) Serve() error {
+	p.side = server
+	p.running = true
+	defer func() { p.running = false }()
+	go p.writer()
+	p.receiver()
+	return nil
+}
+
+func (p *ConnPool) ServeWithListener(lis net.Listener) error {
 	if lis == nil {
 		return errors.New("listener is nil")
 	}
 	defer lis.Close()
 	p.side = server
-	go p.Writer()
-	for {
-		conn, err := lis.Accept()
-		if err != nil {
-			log.Printf("serve accept failed: %s", err)
+	p.running = true
+	defer func() { p.running = false }()
+	go p.writer()
+	go p.receiver()
+	connCh := make(chan net.Conn)
+	go func() {
+		for {
+			conn, err := lis.Accept()
+			if err != nil {
+				close(connCh)
+				log.Printf("serve accept failed: %s", err)
+				break
+			}
+			connCh <- conn
 		}
-		p.AddConn(conn)
+	}()
+	for {
+		select {
+		case <-p.ctx.Done():
+			lis.Close()
+			for range connCh {
+			}
+			return p.ctx.Err()
+		case conn := <-connCh:
+			p.AddConn(conn)
+		}
 	}
 }
 
-func (p *ConnPool) StartWithDialer(dialer Dialer, connNum int) (stop func()) {
+func (p *ConnPool) StartWithDialer(dialer Dialer, connNum int) {
 	p.side = client
-	go p.Writer()
-	done := make(chan bool)
+	go p.writer()
+	go p.receiver()
 	wg := sync.WaitGroup{}
 	for i := 0; i < connNum; i++ {
 		wg.Add(1)
@@ -291,9 +350,11 @@ func (p *ConnPool) StartWithDialer(dialer Dialer, connNum int) (stop func()) {
 
 	ticker := time.NewTicker(time.Second)
 	go func() {
+		p.running = true
+		defer func() { p.running = false }()
 		for {
 			select {
-			case <-done:
+			case <-p.ctx.Done():
 				return
 			case <-ticker.C:
 				toAdd := connNum - len(p.IDs)
@@ -310,10 +371,35 @@ func (p *ConnPool) StartWithDialer(dialer Dialer, connNum int) (stop func()) {
 			}
 		}
 	}()
-	return func() { done <- true }
+	return
 }
 
-func (p *ConnPool) Writer() {
+// Close closes the listener.
+// Any blocked Accept operations will be unblocked and return errors.\
+func (p *ConnPool) Close() error {
+	if !p.running {
+		return errors.New("Not running")
+	}
+	p.tunnMap.Range(func(k, v interface{}) bool {
+		v.(*TunnInfo).Close()
+		p.tunnMap.Delete(k)
+		return true
+	})
+	p.ctxCancel()
+	return nil
+}
+
+// Addr returns the listener's network address.
+func (p *ConnPool) Addr() net.Addr {
+	var addr net.Addr
+	p.connMap.Range(func(k, v interface{}) bool {
+		addr = v.(net.Conn).LocalAddr()
+		return false
+	})
+	return addr
+}
+
+func (p *ConnPool) writer() {
 	for {
 		select {
 		case toSend := <-p.sendCh:
@@ -321,8 +407,10 @@ func (p *ConnPool) Writer() {
 			if err != nil {
 				log.Printf("send failed: %s", err)
 			}
-		case <-p.closeCh:
-			// p.tunnMap.Delete(tunnID)
+		case <-p.ctx.Done():
+			for range p.sendCh {
+			}
+			return
 		}
 	}
 }
@@ -339,17 +427,21 @@ func (p *ConnPool) Send(buf []byte) (int, error) {
 	if !ok || conn == nil {
 		return 0, fmt.Errorf("Connection [%d] not found", connID)
 	}
+	log.Printf("Send")
 	return conn.(net.Conn).Write(buf)
 }
 
 type TunnelWriter struct {
-	TunnID  uint32
-	Seq     uint32
-	sendCh  chan []byte
-	closeCh chan uint32
+	TunnID uint32
+	Seq    uint32
+	sendCh chan []byte
+	closed bool
 }
 
 func (tw *TunnelWriter) Write(data []byte) (n int, err error) {
+	if tw.closed {
+		return 0, errors.New("closed")
+	}
 	Debug.Printf("[%d]Write seq[%d]", tw.TunnID, tw.Seq)
 	packet := &Packet{
 		Type:   Data,
@@ -376,7 +468,7 @@ func (tw *TunnelWriter) Close() error {
 		Data:   make([]byte, 0),
 	}
 	tw.sendCh <- packet.Pack()
-	tw.closeCh <- tw.TunnID
+	tw.closed = true
 	return nil
 }
 
