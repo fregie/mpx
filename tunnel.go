@@ -35,14 +35,16 @@ type Tunnel struct {
 	writer      io.WriteCloser
 }
 
-func NewTunnel(id uint32, writer io.WriteCloser) *Tunnel {
+func NewTunnel(id uint32, la, ra net.Addr, writer io.WriteCloser) *Tunnel {
 	return &Tunnel{
-		ID:       id,
-		leftover: make([]byte, 0),
-		reciver:  make(chan []byte, defaultBufferSize),
-		closeCh:  make(chan bool),
-		writer:   writer,
-		state:    Connected,
+		ID:         id,
+		leftover:   make([]byte, 0),
+		reciver:    make(chan []byte, defaultBufferSize),
+		closeCh:    make(chan bool),
+		writer:     writer,
+		state:      Connected,
+		localAddr:  la,
+		remoteAddr: ra,
 	}
 }
 

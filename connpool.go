@@ -95,18 +95,20 @@ const (
 )
 
 type ConnPool struct {
-	side      side
-	connMap   sync.Map // key: int , value: net.conn
-	IDs       []int
-	idMutex   sync.Mutex
-	tunnMap   sync.Map // key: int , value: Tunnel
-	sendCh    chan []byte
-	recvCh    chan *Packet
-	acceptCh  chan *Tunnel
-	running   bool
-	ctx       context.Context
-	ctxCancel context.CancelFunc
-	dialer    Dialer
+	side       side
+	connMap    sync.Map // key: int , value: net.conn
+	localAddr  net.Addr
+	remoteAddr net.Addr
+	IDs        []int
+	idMutex    sync.Mutex
+	tunnMap    sync.Map // key: int , value: Tunnel
+	sendCh     chan []byte
+	recvCh     chan *Packet
+	acceptCh   chan *Tunnel
+	running    bool
+	ctx        context.Context
+	ctxCancel  context.CancelFunc
+	dialer     Dialer
 }
 
 func NewConnPool() *ConnPool {
@@ -147,7 +149,7 @@ func (p *ConnPool) Connect(data []byte) (*Tunnel, error) {
 		Data:   data,
 	}
 	p.sendCh <- packet.Pack()
-	tunn := NewTunnel(packet.TunnID, &TunnelWriter{
+	tunn := NewTunnel(packet.TunnID, p.localAddr, p.remoteAddr, &TunnelWriter{
 		TunnID: packet.TunnID,
 		Seq:    packet.Length,
 		sendCh: p.sendCh,
@@ -166,6 +168,8 @@ func (p *ConnPool) AddConn(conn net.Conn) error {
 	}
 	p.connMap.Store(connID, conn)
 	p.updateIDs()
+	p.localAddr = conn.LocalAddr()
+	p.remoteAddr = conn.RemoteAddr()
 	go p.handleConn(conn, connID)
 	log.Printf("Add connection [%d]", connID)
 
@@ -223,7 +227,7 @@ func (p *ConnPool) receiver() {
 					continue
 				}
 				Debug.Printf("New tunn")
-				newTunn := NewTunnel(packet.TunnID, &TunnelWriter{
+				newTunn := NewTunnel(packet.TunnID, p.localAddr, p.remoteAddr, &TunnelWriter{
 					TunnID: packet.TunnID,
 					Seq:    0,
 					sendCh: p.sendCh,
@@ -427,7 +431,6 @@ func (p *ConnPool) Send(buf []byte) (int, error) {
 	if !ok || conn == nil {
 		return 0, fmt.Errorf("Connection [%d] not found", connID)
 	}
-	log.Printf("Send")
 	return conn.(net.Conn).Write(buf)
 }
 
