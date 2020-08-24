@@ -9,6 +9,7 @@ import (
 	"net"
 	"os"
 	"sync"
+	"syscall"
 	"time"
 )
 
@@ -441,7 +442,7 @@ type TunnelWriter struct {
 	closed bool
 }
 
-func (tw *TunnelWriter) Write(data []byte) (n int, err error) {
+func (tw *TunnelWriter) Write(ctx context.Context, data []byte) (n int, err error) {
 	if tw.closed {
 		return 0, errors.New("closed")
 	}
@@ -456,7 +457,12 @@ func (tw *TunnelWriter) Write(data []byte) (n int, err error) {
 	if packet.Length > 0 {
 		copy(packet.Data, data)
 	}
-	tw.sendCh <- packet.Pack()
+	select {
+	case tw.sendCh <- packet.Pack():
+	case <-ctx.Done():
+		return 0, syscall.ETIMEDOUT
+	}
+
 	tw.Seq = tw.Seq + packet.Length
 	return len(data), nil
 }
