@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"io"
-	"log"
 	"net"
 	"syscall"
 	"time"
@@ -83,7 +82,6 @@ func (t *Tunnel) Read(buf []byte) (int, error) {
 			t.leftover = new[n:]
 			return n, nil
 		case <-t.readCtx.Done():
-			log.Printf("Closed")
 			if t.state == Closed {
 				Debug.Printf("[%d]EOF", t.ID)
 				return 0, io.EOF

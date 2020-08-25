@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io/ioutil"
 	"log"
 	"math/rand"
 	"net"
@@ -20,8 +21,16 @@ var (
 var (
 	MaxCachedNum = 65535
 	// Debug        = log.New(ioutil.Discard, "[MPX Debug] ", log.Ldate|log.Ltime|log.Lshortfile)
-	Debug = log.New(os.Stdout, "[MPX Debug] ", log.Ldate|log.Ltime|log.Lshortfile)
+	Debug = log.New(ioutil.Discard, "[MPX Debug] ", log.Ldate|log.Ltime|log.Lshortfile)
 )
+
+func Verbose(enable bool) {
+	if enable {
+		Debug.SetOutput(os.Stdout)
+	} else {
+		Debug.SetOutput(ioutil.Discard)
+	}
+}
 
 type Dialer interface {
 	Dial() (net.Conn, error)
@@ -401,6 +410,9 @@ func (p *ConnPool) Addr() net.Addr {
 		addr = v.(net.Conn).LocalAddr()
 		return false
 	})
+	if addr == nil {
+		addr, _ = net.ResolveIPAddr("ip", "0.0.0.0")
+	}
 	return addr
 }
 
