@@ -197,24 +197,27 @@ func (p *ConnPool) updateIDs() {
 }
 
 func (p *ConnPool) handleConn(conn net.Conn, id int) {
+	defer func() {
+		conn.Close()
+		p.connMap.Delete(id)
+		p.updateIDs()
+	}()
+	connCtx, cancel := context.WithCancel(p.ctx)
+	defer cancel()
+	for {
+		packet, err := PacketFromReader(conn)
+		if err != nil {
+			log.Printf("read err:%s", err)
+			break
+		}
+		p.recvCh <- packet
+	}
 	go func() {
-		defer func() {
+		select {
+		case <-connCtx.Done():
 			conn.Close()
-			p.connMap.Delete(id)
-			p.updateIDs()
-		}()
-		for {
-			packet, err := PacketFromReader(conn)
-			if err != nil {
-				log.Printf("read err:%s", err)
-				break
-			}
-			p.recvCh <- packet
 		}
 	}()
-	for range p.ctx.Done() {
-	}
-	conn.Close()
 }
 
 func (p *ConnPool) receiver() {

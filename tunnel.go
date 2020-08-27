@@ -118,6 +118,7 @@ func (t *Tunnel) Close() error {
 	if t.state != Closed {
 		t.state = Closed
 		t.readCancel()
+		t.writeCancel()
 		return t.writer.Close()
 	}
 	return nil
