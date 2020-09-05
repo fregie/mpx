@@ -8,24 +8,24 @@ import (
 	netstack "github.com/google/netstack/tcpip/header"
 )
 
-type Type uint8
+type packetType uint8
 
-func (t *Type) Uint8() uint8 { return uint8(*t) }
-func ParseType(t uint8) Type { return Type(t) }
+func (t *packetType) Uint8() uint8 { return uint8(*t) }
+func ParseType(t uint8) packetType { return packetType(t) }
 
 const (
-	Connect Type = iota
+	Connect packetType = iota
 	Disconnect
 	Data
 	RST
 )
 
 const (
-	HeaderSize = 18 //byte
+	headerSize = 18 //byte
 )
 
-type Packet struct {
-	Type     Type
+type mpxPacket struct {
+	Type     packetType
 	Unused1  uint8
 	Unused2  uint16
 	TunnID   uint32
@@ -35,26 +35,26 @@ type Packet struct {
 	Data     []byte
 }
 
-func (p *Packet) Pack() []byte {
-	packed := make([]byte, HeaderSize+len(p.Data))
+func (p *mpxPacket) Pack() []byte {
+	packed := make([]byte, headerSize+len(p.Data))
 	packed[0] = p.Type.Uint8()
 	binary.BigEndian.PutUint32(packed[4:], p.TunnID)
 	binary.BigEndian.PutUint32(packed[8:], p.Seq)
 	binary.BigEndian.PutUint32(packed[12:], p.Length)
 	cksm := netstack.Checksum(packed[:16], 0)
 	binary.BigEndian.PutUint16(packed[16:], cksm)
-	copy(packed[HeaderSize:], p.Data)
+	copy(packed[headerSize:], p.Data)
 	return packed
 }
 
-func PacketFromReader(r io.Reader) (*Packet, error) {
-	headerBuf := make([]byte, HeaderSize)
+func PacketFromReader(r io.Reader) (*mpxPacket, error) {
+	headerBuf := make([]byte, headerSize)
 	_, err := io.ReadFull(r, headerBuf)
 
 	if err != nil {
 		return nil, err
 	}
-	p := &Packet{
+	p := &mpxPacket{
 		Type:     ParseType(headerBuf[0]),
 		TunnID:   binary.BigEndian.Uint32(headerBuf[4:]),
 		Seq:      binary.BigEndian.Uint32(headerBuf[8:]),
@@ -74,11 +74,11 @@ func PacketFromReader(r io.Reader) (*Packet, error) {
 	return p, nil
 }
 
-func NewRSTPacket(tunnID uint32, data []byte) *Packet {
+func NewRSTPacket(tunnID uint32, data []byte) *mpxPacket {
 	if data == nil {
 		data = make([]byte, 0)
 	}
-	return &Packet{
+	return &mpxPacket{
 		Type:   RST,
 		TunnID: tunnID,
 		Length: uint32(len(data)),

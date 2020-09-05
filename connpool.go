@@ -20,15 +20,15 @@ var (
 
 var (
 	MaxCachedNum = 65535
-	// Debug        = log.New(ioutil.Discard, "[MPX Debug] ", log.Ldate|log.Ltime|log.Lshortfile)
-	Debug = log.New(ioutil.Discard, "[MPX Debug] ", log.Ldate|log.Ltime|log.Lshortfile)
+	// debug        = log.New(ioutil.Discard, "[MPX debug] ", log.Ldate|log.Ltime|log.Lshortfile)
+	debug = log.New(ioutil.Discard, "[MPX Debug] ", log.Ldate|log.Ltime|log.Lshortfile)
 )
 
 func Verbose(enable bool) {
 	if enable {
-		Debug.SetOutput(os.Stdout)
+		debug.SetOutput(os.Stdout)
 	} else {
-		Debug.SetOutput(ioutil.Discard)
+		debug.SetOutput(ioutil.Discard)
 	}
 }
 
@@ -42,7 +42,7 @@ type Conn struct {
 	ID int
 }
 
-type TunnInfo struct {
+type tunnInfo struct {
 	*Tunnel
 	Ack            uint32
 	unInputed      sync.Map // key: seq, value: *packet
@@ -51,43 +51,43 @@ type TunnInfo struct {
 	closeAt        uint32
 }
 
-func (t *TunnInfo) receiveData(p *Packet) {
-	Debug.Printf("[%d] input seq[%d]", t.ID, p.Seq)
+func (t *tunnInfo) receiveData(p *mpxPacket) {
+	debug.Printf("[%d] input seq[%d]", t.ID, p.Seq)
 	t.input(p.Data)
 	t.Ack += p.Length
 }
 
-func (t *TunnInfo) cache(packet *Packet) (needRST bool) {
+func (t *tunnInfo) cache(packet *mpxPacket) (needRST bool) {
 	_, loaded := t.unInputed.LoadOrStore(packet.Seq, packet)
 	if loaded {
-		Debug.Printf("RST cause chong fu")
+		debug.Printf("RST cause chong fu")
 		return true
 	}
 	// Debug.Printf("[%d] cache seq[%d]", t.ID, packet.Seq)
 	t.unInputedCount++
 	if t.unInputedCount >= t.maxCachedNum {
-		Debug.Printf("RST cause max cache")
+		debug.Printf("RST cause max cache")
 		return true
 	}
 	return false
 }
 
-func (t *TunnInfo) removeCached(seq uint32) {
+func (t *tunnInfo) removeCached(seq uint32) {
 	// Debug.Printf("[%d] remove cache seq[%d]", t.ID, seq)
 	t.unInputed.Delete(seq)
 	t.unInputedCount--
 }
 
-func (t *TunnInfo) update() (needDelete bool) {
+func (t *tunnInfo) update() (needDelete bool) {
 	for {
 		p, ok := t.unInputed.Load(t.Ack)
 		if ok && p != nil {
 			// Debug.Printf("[%d] load cahce seq[%d]", t.ID, t.Ack)
-			packet := p.(*Packet)
+			packet := p.(*mpxPacket)
 			t.removeCached(t.Ack)
 			t.receiveData(packet)
 			if t.closeAt != 0 && t.Ack == t.closeAt {
-				Debug.Printf("Close at %d", t.Tunnel.ID)
+				debug.Printf("Close at %d", t.Tunnel.ID)
 				t.RemoteClose()
 				return true
 			}
@@ -117,7 +117,7 @@ type ConnPool struct {
 	idMutex    sync.Mutex
 	tunnMap    sync.Map // key: int , value: Tunnel
 	sendCh     chan []byte
-	recvCh     chan *Packet
+	recvCh     chan *mpxPacket
 	acceptCh   chan *Tunnel
 	running    bool
 	ctx        context.Context
@@ -131,7 +131,7 @@ func NewConnPool() *ConnPool {
 	p := &ConnPool{
 		IDs:       make([]int, 0),
 		sendCh:    make(chan []byte),
-		recvCh:    make(chan *Packet),
+		recvCh:    make(chan *mpxPacket),
 		ctx:       ctx,
 		ctxCancel: cancel,
 		acceptCh:  make(chan *Tunnel),
@@ -165,7 +165,7 @@ func (p *ConnPool) Connect(data []byte) (*Tunnel, error) {
 	for v, ok := p.tunnMap.Load(tunnID); ok && v != nil; {
 		tunnID = rand.Intn(65535)
 	}
-	packet := &Packet{
+	packet := &mpxPacket{
 		Type:   Connect,
 		TunnID: uint32(tunnID),
 		Seq:    0,
@@ -173,12 +173,12 @@ func (p *ConnPool) Connect(data []byte) (*Tunnel, error) {
 		Data:   data,
 	}
 	p.sendCh <- packet.Pack()
-	tunn := NewTunnel(packet.TunnID, p.localAddr, p.remoteAddr, &TunnelWriter{
+	tunn := newTunnel(packet.TunnID, p.localAddr, p.remoteAddr, &tunnelWriter{
 		TunnID: packet.TunnID,
 		Seq:    packet.Length,
 		sendCh: p.sendCh,
 	})
-	p.tunnMap.Store(packet.TunnID, &TunnInfo{Tunnel: tunn, maxCachedNum: MaxCachedNum})
+	p.tunnMap.Store(packet.TunnID, &tunnInfo{Tunnel: tunn, maxCachedNum: MaxCachedNum})
 	return tunn, nil
 }
 
@@ -246,26 +246,26 @@ func (p *ConnPool) receiver() {
 			if !ok {
 				return
 			}
-			Debug.Printf("[%d] receive: seq[%d]", packet.TunnID, packet.Seq)
-			var tunn *TunnInfo
+			debug.Printf("[%d] receive: seq[%d]", packet.TunnID, packet.Seq)
+			var tunn *tunnInfo
 			tunnel, ok := p.tunnMap.Load(packet.TunnID)
 			if !ok || tunnel == nil {
 				if p.side == client {
-					Debug.Printf("[%d] drop deq[%d]", packet.TunnID, packet.Seq)
+					debug.Printf("[%d] drop deq[%d]", packet.TunnID, packet.Seq)
 					continue
 				}
-				Debug.Printf("New tunn")
-				newTunn := NewTunnel(packet.TunnID, p.localAddr, p.remoteAddr, &TunnelWriter{
+				debug.Printf("New tunn")
+				newTunn := newTunnel(packet.TunnID, p.localAddr, p.remoteAddr, &tunnelWriter{
 					TunnID: packet.TunnID,
 					Seq:    0,
 					sendCh: p.sendCh,
 				})
-				ti := &TunnInfo{Tunnel: newTunn, Ack: 0, maxCachedNum: MaxCachedNum}
+				ti := &tunnInfo{Tunnel: newTunn, Ack: 0, maxCachedNum: MaxCachedNum}
 				p.tunnMap.Store(newTunn.ID, ti)
 				p.acceptCh <- newTunn
 				tunn = ti
 			} else {
-				tunn = tunnel.(*TunnInfo)
+				tunn = tunnel.(*tunnInfo)
 			}
 			switch packet.Type {
 			case Connect:
@@ -274,17 +274,17 @@ func (p *ConnPool) receiver() {
 					if tunn.unInputedCount > 0 {
 						needDelete := tunn.update()
 						if needDelete {
-							Debug.Printf("[%d]Delete tunnel", tunn.ID)
+							debug.Printf("[%d]Delete tunnel", tunn.ID)
 							p.tunnMap.Delete(tunn.ID)
 						}
 					}
 				}
 			case Disconnect:
-				Debug.Printf("[%d]receive disconnect", packet.TunnID)
+				debug.Printf("[%d]receive disconnect", packet.TunnID)
 				if packet.Seq == tunn.Ack {
-					Debug.Printf("Close %d", tunn.ID)
+					debug.Printf("Close %d", tunn.ID)
 					tunn.RemoteClose()
-					Debug.Printf("[%d]Delete tunnel", tunn.ID)
+					debug.Printf("[%d]Delete tunnel", tunn.ID)
 					p.tunnMap.Delete(tunn.ID)
 					goto CONTINUE
 				}
@@ -295,7 +295,7 @@ func (p *ConnPool) receiver() {
 					if tunn.unInputedCount > 0 {
 						needDelete := tunn.update()
 						if needDelete {
-							Debug.Printf("[%d]Delete tunnel", tunn.ID)
+							debug.Printf("[%d]Delete tunnel", tunn.ID)
 							p.tunnMap.Delete(tunn.ID)
 						}
 					}
@@ -303,7 +303,7 @@ func (p *ConnPool) receiver() {
 				}
 				needRST := tunn.cache(packet)
 				if needRST {
-					_, err := p.Send(NewRSTPacket(packet.TunnID, nil).Pack())
+					_, err := p.send(NewRSTPacket(packet.TunnID, nil).Pack())
 					if err != nil {
 						log.Printf("send packet failed: %s", err)
 					}
@@ -419,7 +419,7 @@ func (p *ConnPool) Close() error {
 		return errors.New("Not running")
 	}
 	p.tunnMap.Range(func(k, v interface{}) bool {
-		v.(*TunnInfo).Close()
+		v.(*tunnInfo).Close()
 		p.tunnMap.Delete(k)
 		return true
 	})
@@ -444,7 +444,7 @@ func (p *ConnPool) writer() {
 	for {
 		select {
 		case toSend := <-p.sendCh:
-			_, err := p.Send(toSend)
+			_, err := p.send(toSend)
 			if err != nil {
 				log.Printf("send failed: %s", err)
 			}
@@ -456,7 +456,7 @@ func (p *ConnPool) writer() {
 	}
 }
 
-func (p *ConnPool) Send(buf []byte) (int, error) {
+func (p *ConnPool) send(buf []byte) (int, error) {
 	if buf == nil || len(buf) == 0 {
 		return 0, errors.New("buffer is nil or empty")
 	}
@@ -471,19 +471,19 @@ func (p *ConnPool) Send(buf []byte) (int, error) {
 	return conn.(net.Conn).Write(buf)
 }
 
-type TunnelWriter struct {
+type tunnelWriter struct {
 	TunnID uint32
 	Seq    uint32
 	sendCh chan []byte
 	closed bool
 }
 
-func (tw *TunnelWriter) Write(ctx context.Context, data []byte) (n int, err error) {
+func (tw *tunnelWriter) Write(ctx context.Context, data []byte) (n int, err error) {
 	if tw.closed {
 		return 0, errors.New("closed")
 	}
-	Debug.Printf("[%d]Write seq[%d]", tw.TunnID, tw.Seq)
-	packet := &Packet{
+	debug.Printf("[%d]Write seq[%d]", tw.TunnID, tw.Seq)
+	packet := &mpxPacket{
 		Type:   Data,
 		TunnID: tw.TunnID,
 		Seq:    tw.Seq,
@@ -503,9 +503,9 @@ func (tw *TunnelWriter) Write(ctx context.Context, data []byte) (n int, err erro
 	return len(data), nil
 }
 
-func (tw *TunnelWriter) Close() error {
-	Debug.Printf("[%d]send close[%d]", tw.TunnID, tw.Seq)
-	packet := &Packet{
+func (tw *tunnelWriter) Close() error {
+	debug.Printf("[%d]send close[%d]", tw.TunnID, tw.Seq)
+	packet := &mpxPacket{
 		Type:   Disconnect,
 		TunnID: tw.TunnID,
 		Seq:    tw.Seq,

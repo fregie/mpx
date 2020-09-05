@@ -13,10 +13,10 @@ const (
 	defaultBufferSize = 65535
 )
 
-type State int
+type state int
 
 const (
-	Connected State = iota
+	Connected state = iota
 	Closed
 )
 
@@ -30,11 +30,11 @@ type Tunnel struct {
 	writeCtx    context.Context
 	writeCancel context.CancelFunc
 	leftover    []byte
-	state       State
-	writer      *TunnelWriter
+	state       state
+	writer      *tunnelWriter
 }
 
-func NewTunnel(id uint32, la, ra net.Addr, writer *TunnelWriter) *Tunnel {
+func newTunnel(id uint32, la, ra net.Addr, writer *tunnelWriter) *Tunnel {
 	readctx, readcancel := context.WithCancel(context.Background())
 	writectx, writecancel := context.WithCancel(context.Background())
 	return &Tunnel{
@@ -69,7 +69,7 @@ func (t *Tunnel) input(data []byte) {
 
 func (t *Tunnel) Read(buf []byte) (int, error) {
 	if t.state == Closed && len(t.leftover) == 0 && len(t.reciver) == 0 {
-		Debug.Printf("[%d]EOF", t.ID)
+		debug.Printf("[%d]EOF", t.ID)
 		return 0, io.EOF
 	}
 	if buf == nil {
@@ -83,7 +83,7 @@ func (t *Tunnel) Read(buf []byte) (int, error) {
 			return n, nil
 		case <-t.readCtx.Done():
 			if t.state == Closed {
-				Debug.Printf("[%d]EOF", t.ID)
+				debug.Printf("[%d]EOF", t.ID)
 				return 0, io.EOF
 			} else {
 				return 0, syscall.ETIMEDOUT
