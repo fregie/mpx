@@ -32,6 +32,7 @@ func Verbose(enable bool) {
 	}
 }
 
+// Dialer 用于建立net.Conn连接
 type Dialer interface {
 	Dial() (net.Conn, error)
 }
@@ -104,6 +105,9 @@ const (
 	client
 )
 
+// ConnPool 是使用mpx主要用到的结构体
+// 接受任何实现了 net.Conn 接口的连接作为输入
+// 可以直接调用 AddConn 方法将Conn输入，也可以调用 ServeWithListener 输入一个 net.Listener ，调用 StartWithDialer 输入一个 dailer (mpx库中的一个interface)来使用mpx
 type ConnPool struct {
 	side       side
 	connMap    sync.Map // key: int , value: net.conn
@@ -121,6 +125,7 @@ type ConnPool struct {
 	dialer     Dialer
 }
 
+// NewConnPool 创建一个新的 *ConnPool
 func NewConnPool() *ConnPool {
 	ctx, cancel := context.WithCancel(context.Background())
 	p := &ConnPool{
@@ -134,6 +139,8 @@ func NewConnPool() *ConnPool {
 	return p
 }
 
+// Accept 阻塞直到有新的连接可以返回
+// 返回的 *Tunnel 实现了 net.Conn
 func (p *ConnPool) Accept() (*Tunnel, error) {
 	select {
 	case tunn := <-p.acceptCh:
@@ -143,6 +150,13 @@ func (p *ConnPool) Accept() (*Tunnel, error) {
 	}
 }
 
+// Dial 建立并返回一个新的mpx连接（net.Conn）
+// 参数中data为在建立连接的时候携带要传输的数据，可以为nil
+func (p *ConnPool) Dial(data []byte) (*Tunnel, error) {
+	return p.Connect(data)
+}
+
+// Connect 同Dial
 func (p *ConnPool) Connect(data []byte) (*Tunnel, error) {
 	if data == nil {
 		data = make([]byte, 0)
@@ -168,6 +182,7 @@ func (p *ConnPool) Connect(data []byte) (*Tunnel, error) {
 	return tunn, nil
 }
 
+// AddConn 向ConnPool中添加一个新的net.Conn
 func (p *ConnPool) AddConn(conn net.Conn) error {
 	if conn == nil {
 		return errors.New("Conn is nil")
@@ -300,6 +315,8 @@ func (p *ConnPool) receiver() {
 	}
 }
 
+// Serve 启用服务，适用于使用 AddConn 方法输入连接的情况下启用服务
+// 如果已经调用 ServeWithListener 或 StartWithDialer，请勿调用该方法
 func (p *ConnPool) Serve() error {
 	p.side = server
 	p.running = true
@@ -309,6 +326,8 @@ func (p *ConnPool) Serve() error {
 	return nil
 }
 
+// ServeWithListener 启用服务，通过 net.Listener 输入连接
+// 请勿和 Serve 同时调用
 func (p *ConnPool) ServeWithListener(lis net.Listener) error {
 	if lis == nil {
 		return errors.New("listener is nil")
@@ -344,6 +363,8 @@ func (p *ConnPool) ServeWithListener(lis net.Listener) error {
 	}
 }
 
+// StartWithDialer 启用服务，通过 Dailer 输入连接
+// 请勿和 Serve 同时调用
 func (p *ConnPool) StartWithDialer(dialer Dialer, connNum int) {
 	p.side = client
 	go p.writer()
