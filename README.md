@@ -1,5 +1,5 @@
 # mpx
-<p align="center">
+<p align="left">
 <a href="https://github.com/fregie/mpx/actions?query=workflow%3ABuild"><img src="https://github.com/fregie/mpx/workflows/Build/badge.svg" alt="Build Status"></a>
 <a href="https://goreportcard.com/report/github.com/fregie/mpx"><img src="https://goreportcard.com/badge/github.com/fregie/mpx" alt="go report"></a>
 <a href="https://pkg.go.dev/github.com/fregie/mpx"><img src="https://img.shields.io/badge/go.dev-reference-007d9c?logo=go&logoColor=white" alt="go.dev"></a>
