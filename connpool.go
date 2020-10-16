@@ -196,7 +196,7 @@ func (p *ConnPool) AddConn(conn net.Conn) error {
 	p.localAddr = conn.LocalAddr()
 	p.remoteAddr = conn.RemoteAddr()
 	go p.handleConn(conn, connID)
-	log.Printf("Add connection [%d]", connID)
+	debug.Printf("Add connection [%d]", connID)
 
 	return nil
 }
