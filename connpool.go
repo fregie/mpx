@@ -9,6 +9,7 @@ import (
 	"math/rand"
 	"net"
 	"os"
+	"runtime"
 	"sync"
 	"syscall"
 	"time"
@@ -158,6 +159,8 @@ func (p *ConnPool) Dial(data []byte) (*Tunnel, error) {
 
 // Connect 同Dial
 func (p *ConnPool) Connect(data []byte) (*Tunnel, error) {
+	runtime.GC()
+	// ddebug.FreeOSMemory()
 	if data == nil {
 		data = make([]byte, 0)
 	}
