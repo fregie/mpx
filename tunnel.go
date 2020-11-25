@@ -10,7 +10,7 @@ import (
 )
 
 const (
-	defaultBufferSize = 1024
+	defaultBufferSize = 256
 )
 
 type state int
