@@ -367,30 +367,25 @@ func (p *ConnPool) ServeWithListener(lis net.Listener) error {
 }
 
 // StartWithDialer 启用服务，通过 Dailer 输入连接
-// 请勿和 Serve 同时调用
-func (p *ConnPool) StartWithDialer(dialer Dialer, connNum int) {
+// 注意：请勿和 Serve 同时调用
+// 注意：err != nil 代表建立第一个连接失败，但是仍然会启动服务，若想停止服务请调用Close()
+func (p *ConnPool) StartWithDialer(dialer Dialer, connNum int) (err error) {
 	p.side = client
 	go p.writer()
 	go p.receiver()
-	wg := sync.WaitGroup{}
-	for i := 0; i < connNum; i++ {
-		wg.Add(1)
-		go func() {
-			conn, err := dialer.Dial()
-			if err != nil {
-				log.Printf("Dail failed: %s", err)
-			}
-			err = p.AddConn(conn)
-			if err != nil {
-				log.Printf("AddConn failed: %s", err)
-			}
-			wg.Done()
-		}()
-	}
-	wg.Wait()
 
-	ticker := time.NewTicker(time.Second)
+	conn, err := dialer.Dial()
+	if err != nil {
+		log.Printf("Dail failed: %s", err)
+	} else {
+		err = p.AddConn(conn)
+		if err != nil {
+			log.Printf("AddConn failed: %s", err)
+		}
+	}
+
 	go func() {
+		ticker := time.NewTicker(time.Second)
 		p.running = true
 		defer func() { p.running = false }()
 		for {
@@ -400,13 +395,13 @@ func (p *ConnPool) StartWithDialer(dialer Dialer, connNum int) {
 			case <-ticker.C:
 				toAdd := connNum - len(p.IDs)
 				for i := 0; i < toAdd; i++ {
-					conn, err := dialer.Dial()
-					if err != nil {
-						log.Printf("Dail failed: %s", err)
+					conn, e := dialer.Dial()
+					if e != nil {
+						log.Printf("Dail failed: %s", e)
 					}
-					err = p.AddConn(conn)
-					if err != nil {
-						log.Printf("AddConn failed: %s", err)
+					e = p.AddConn(conn)
+					if e != nil {
+						log.Printf("AddConn failed: %s", e)
 					}
 				}
 			}
