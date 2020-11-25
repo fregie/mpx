@@ -371,6 +371,7 @@ func (p *ConnPool) ServeWithListener(lis net.Listener) error {
 // 注意：err != nil 代表建立第一个连接失败，但是仍然会启动服务，若想停止服务请调用Close()
 func (p *ConnPool) StartWithDialer(dialer Dialer, connNum int) (err error) {
 	p.side = client
+	p.running = true
 	go p.writer()
 	go p.receiver()
 
@@ -386,7 +387,6 @@ func (p *ConnPool) StartWithDialer(dialer Dialer, connNum int) (err error) {
 
 	go func() {
 		ticker := time.NewTicker(time.Second)
-		p.running = true
 		defer func() { p.running = false }()
 		for {
 			select {
