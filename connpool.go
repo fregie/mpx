@@ -222,6 +222,12 @@ func (p *ConnPool) handleConn(conn net.Conn, id int) {
 	}()
 	connCtx, cancel := context.WithCancel(p.ctx)
 	defer cancel()
+	go func() {
+		select {
+		case <-connCtx.Done():
+			conn.Close()
+		}
+	}()
 	for {
 		packet, err := PacketFromReader(conn)
 		if err != nil {
@@ -230,12 +236,6 @@ func (p *ConnPool) handleConn(conn net.Conn, id int) {
 		}
 		p.recvCh <- packet
 	}
-	go func() {
-		select {
-		case <-connCtx.Done():
-			conn.Close()
-		}
-	}()
 }
 
 func (p *ConnPool) receiver() {
