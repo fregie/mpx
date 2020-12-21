@@ -199,7 +199,7 @@ func (p *ConnPool) AddConn(conn net.Conn) error {
 	p.localAddr = conn.LocalAddr()
 	p.remoteAddr = conn.RemoteAddr()
 	go p.handleConn(conn, connID)
-	debug.Printf("Add connection [%d]", connID)
+	log.Printf("Add connection [%d]", connID)
 
 	return nil
 }
@@ -228,11 +228,38 @@ func (p *ConnPool) handleConn(conn net.Conn, id int) {
 			conn.Close()
 		}
 	}()
+	lastHeartBeat := time.Now()
+	go func() {
+		ticker := time.NewTicker(2 * time.Second)
+		for range ticker.C {
+			_, err := conn.Write(NewHeartbeatPacket().Pack())
+			if err != nil {
+				log.Printf("read err:%s", err)
+				conn.Close()
+				break
+			}
+		}
+	}()
+	go func() {
+		checkDuration := 3 * time.Second
+		timer := time.NewTimer(checkDuration)
+		for range timer.C {
+			if time.Now().After(lastHeartBeat.Add(checkDuration)) {
+				conn.Close()
+				break
+			}
+			timer.Reset(checkDuration)
+		}
+	}()
 	for {
 		packet, err := PacketFromReader(conn)
 		if err != nil {
 			log.Printf("read err:%s", err)
 			break
+		}
+		if packet.Type == Heartbeat {
+			lastHeartBeat = time.Now()
+			continue
 		}
 		p.recvCh <- packet
 	}
@@ -398,10 +425,12 @@ func (p *ConnPool) StartWithDialer(dialer Dialer, connNum int) (err error) {
 					conn, e := dialer.Dial()
 					if e != nil {
 						log.Printf("Dail failed: %s", e)
+						continue
 					}
 					e = p.AddConn(conn)
 					if e != nil {
 						log.Printf("AddConn failed: %s", e)
+						continue
 					}
 				}
 			}
@@ -466,7 +495,11 @@ func (p *ConnPool) send(buf []byte) (int, error) {
 	if !ok || conn == nil {
 		return 0, fmt.Errorf("Connection [%d] not found", connID)
 	}
-	return conn.(net.Conn).Write(buf)
+	n, err := conn.(net.Conn).Write(buf)
+	if err != nil {
+		conn.(net.Conn).Close()
+	}
+	return n, err
 }
 
 type tunnelWriter struct {

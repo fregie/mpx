@@ -18,6 +18,7 @@ const (
 	Disconnect
 	Data
 	RST
+	Heartbeat
 )
 
 const (
@@ -83,5 +84,14 @@ func NewRSTPacket(tunnID uint32, data []byte) *mpxPacket {
 		TunnID: tunnID,
 		Length: uint32(len(data)),
 		Data:   data,
+	}
+}
+
+func NewHeartbeatPacket() *mpxPacket {
+	return &mpxPacket{
+		Type:   Heartbeat,
+		TunnID: 0,
+		Length: 0,
+		Data:   []byte{},
 	}
 }
