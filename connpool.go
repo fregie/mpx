@@ -240,11 +240,12 @@ func (p *ConnPool) handleConn(conn net.Conn, id int) {
 			}
 		}
 	}()
+	enableHeartbeat := false
 	go func() {
 		checkDuration := 3 * time.Second
 		timer := time.NewTimer(checkDuration)
 		for range timer.C {
-			if time.Now().After(lastHeartBeat.Add(checkDuration)) {
+			if enableHeartbeat && time.Now().After(lastHeartBeat.Add(checkDuration)) {
 				conn.Close()
 				break
 			}
@@ -259,6 +260,8 @@ func (p *ConnPool) handleConn(conn net.Conn, id int) {
 		}
 		if packet.Type == Heartbeat {
 			lastHeartBeat = time.Now()
+			// log.Printf("Heartbeat")
+			enableHeartbeat = true
 			continue
 		}
 		p.recvCh <- packet
