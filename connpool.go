@@ -115,7 +115,7 @@ type ConnPool struct {
 	localAddr  net.Addr
 	remoteAddr net.Addr
 	IDs        []int
-	idMutex    sync.Mutex
+	idMutex    sync.RWMutex
 	tunnMap    sync.Map // key: int , value: Tunnel
 	sendCh     chan []byte
 	recvCh     chan *mpxPacket
@@ -212,6 +212,21 @@ func (p *ConnPool) updateIDs() {
 		p.IDs = append(p.IDs, k.(int))
 		return true
 	})
+}
+
+func (p *ConnPool) loadRandomID() (int, error) {
+	p.idMutex.RLock()
+	defer p.idMutex.RUnlock()
+	if len(p.IDs) == 0 {
+		return 0, errors.New("No available connection")
+	}
+	return p.IDs[rand.Intn(len(p.IDs))], nil
+}
+
+func (p *ConnPool) IDCount() int {
+	p.idMutex.RLock()
+	defer p.idMutex.RUnlock()
+	return len(p.IDs)
 }
 
 func (p *ConnPool) handleConn(conn net.Conn, id int) {
@@ -423,7 +438,7 @@ func (p *ConnPool) StartWithDialer(dialer Dialer, connNum int) (err error) {
 			case <-p.ctx.Done():
 				return
 			case <-ticker.C:
-				toAdd := connNum - len(p.IDs)
+				toAdd := connNum - p.IDCount()
 				for i := 0; i < toAdd; i++ {
 					conn, e := dialer.Dial()
 					if e != nil {
@@ -490,10 +505,10 @@ func (p *ConnPool) send(buf []byte) (int, error) {
 	if buf == nil || len(buf) == 0 {
 		return 0, errors.New("buffer is nil or empty")
 	}
-	if len(p.IDs) == 0 {
-		return 0, errors.New("No available connection")
+	connID, err := p.loadRandomID()
+	if err != nil {
+		return 0, err
 	}
-	connID := p.IDs[rand.Intn(len(p.IDs))]
 	conn, ok := p.connMap.Load(connID)
 	if !ok || conn == nil {
 		return 0, fmt.Errorf("Connection [%d] not found", connID)
