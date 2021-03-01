@@ -199,7 +199,7 @@ func (p *ConnPool) AddConn(conn net.Conn) error {
 	p.localAddr = conn.LocalAddr()
 	p.remoteAddr = conn.RemoteAddr()
 	go p.handleConn(conn, connID)
-	log.Printf("Add connection [%d]", connID)
+	debug.Printf("Add connection [%d]", connID)
 
 	return nil
 }
@@ -249,7 +249,7 @@ func (p *ConnPool) handleConn(conn net.Conn, id int) {
 		for range ticker.C {
 			_, err := conn.Write(NewHeartbeatPacket().Pack())
 			if err != nil {
-				log.Printf("read err:%s", err)
+				debug.Printf("read err:%s", err)
 				conn.Close()
 				break
 			}
@@ -270,7 +270,7 @@ func (p *ConnPool) handleConn(conn net.Conn, id int) {
 	for {
 		packet, err := PacketFromReader(conn)
 		if err != nil {
-			log.Printf("read err:%s", err)
+			debug.Printf("read err:%s", err)
 			break
 		}
 		if packet.Type == Heartbeat {
