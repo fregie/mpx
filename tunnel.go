@@ -109,16 +109,18 @@ func (t *Tunnel) Write(b []byte) (n int, err error) {
 }
 
 func (t *Tunnel) RemoteClose() {
+	t.readCancel()
+	t.writeCancel()
 	t.state = Closed
 }
 
 // Close closes the connection.
 // Any blocked Read or Write operations will be unblocked and return errors.
 func (t *Tunnel) Close() error {
+	t.readCancel()
+	t.writeCancel()
 	if t.state != Closed {
 		t.state = Closed
-		t.readCancel()
-		t.writeCancel()
 		return t.writer.Close()
 	}
 	return nil

@@ -160,7 +160,11 @@ func (p *ConnPool) Dial(data []byte) (*Tunnel, error) {
 // Connect 同Dial
 func (p *ConnPool) Connect(data []byte) (*Tunnel, error) {
 	runtime.GC()
-	// ddebug.FreeOSMemory()
+	defer func() {
+		if v := recover(); v != nil {
+			debug.Println("capture a panic:", v)
+		}
+	}()
 	if data == nil {
 		data = make([]byte, 0)
 	}
@@ -231,6 +235,9 @@ func (p *ConnPool) IDCount() int {
 
 func (p *ConnPool) handleConn(conn net.Conn, id int) {
 	defer func() {
+		if v := recover(); v != nil {
+			debug.Println("capture a panic:", v)
+		}
 		conn.Close()
 		p.connMap.Delete(id)
 		p.updateIDs()
@@ -469,6 +476,8 @@ func (p *ConnPool) Close() error {
 		return true
 	})
 	p.ctxCancel()
+	close(p.sendCh)
+	close(p.recvCh)
 	return nil
 }
 
@@ -491,7 +500,7 @@ func (p *ConnPool) writer() {
 		case toSend := <-p.sendCh:
 			_, err := p.send(toSend)
 			if err != nil {
-				log.Printf("send failed: %s", err)
+				debug.Printf("send failed: %s", err)
 			}
 		case <-p.ctx.Done():
 			for range p.sendCh {
@@ -528,6 +537,13 @@ type tunnelWriter struct {
 }
 
 func (tw *tunnelWriter) Write(ctx context.Context, data []byte) (n int, err error) {
+	defer func() {
+		if v := recover(); v != nil {
+			debug.Println("capture a panic:", v)
+			n = 0
+			err = errors.New("panic")
+		}
+	}()
 	if tw.closed {
 		return 0, errors.New("closed")
 	}
@@ -552,7 +568,13 @@ func (tw *tunnelWriter) Write(ctx context.Context, data []byte) (n int, err erro
 	return len(data), nil
 }
 
-func (tw *tunnelWriter) Close() error {
+func (tw *tunnelWriter) Close() (err error) {
+	defer func() {
+		if v := recover(); v != nil {
+			debug.Println("capture a panic:", v)
+			err = errors.New("panic")
+		}
+	}()
 	debug.Printf("[%d]send close[%d]", tw.TunnID, tw.Seq)
 	packet := &mpxPacket{
 		Type:   Disconnect,
