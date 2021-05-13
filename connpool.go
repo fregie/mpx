@@ -110,20 +110,21 @@ const (
 // 接受任何实现了 net.Conn 接口的连接作为输入
 // 可以直接调用 AddConn 方法将Conn输入，也可以调用 ServeWithListener 输入一个 net.Listener ，调用 StartWithDialer 输入一个 dailer (mpx库中的一个interface)来使用mpx
 type ConnPool struct {
-	side       side
-	connMap    sync.Map // key: int , value: net.conn
-	localAddr  net.Addr
-	remoteAddr net.Addr
-	IDs        []int
-	idMutex    sync.RWMutex
-	tunnMap    sync.Map // key: int , value: Tunnel
-	sendCh     chan []byte
-	recvCh     chan *mpxPacket
-	acceptCh   chan *Tunnel
-	running    bool
-	ctx        context.Context
-	ctxCancel  context.CancelFunc
-	dialer     Dialer
+	side          side
+	connMap       sync.Map // key: int , value: net.conn
+	localAddr     net.Addr
+	remoteAddr    net.Addr
+	IDs           []int
+	idMutex       sync.RWMutex
+	tunnMap       sync.Map // key: int , value: Tunnel
+	chanCloseOnce sync.Once
+	sendCh        chan []byte
+	recvCh        chan *mpxPacket
+	acceptCh      chan *Tunnel
+	running       bool
+	ctx           context.Context
+	ctxCancel     context.CancelFunc
+	dialer        Dialer
 }
 
 // NewConnPool 创建一个新的 *ConnPool
@@ -476,8 +477,10 @@ func (p *ConnPool) Close() error {
 		return true
 	})
 	p.ctxCancel()
-	close(p.sendCh)
-	close(p.recvCh)
+	p.chanCloseOnce.Do(func() {
+		close(p.sendCh)
+		close(p.recvCh)
+	})
 	return nil
 }
 
