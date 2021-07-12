@@ -4,7 +4,6 @@
 <a href="https://goreportcard.com/report/github.com/fregie/mpx"><img src="https://goreportcard.com/badge/github.com/fregie/mpx" alt="go report"></a>
 <a href="https://pkg.go.dev/github.com/fregie/mpx"><img src="https://img.shields.io/badge/go.dev-reference-007d9c?logo=go&logoColor=white" alt="go.dev"></a>
 <a href="https://opensource.org/licenses/GPL-3-Clause"><img src="https://img.shields.io/badge/license-GPL3-orange.svg" alt="Licenses"></a>
-<a href="https://github.com/fregie"><img src="https://img.shields.io/badge/fregie-weapon-blue" alt="Licenses"></a>
 </p>
 
   
