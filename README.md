@@ -25,6 +25,11 @@ mpx接受任何实现了 `net.Conn` 接口的连接作为输入。
 mpx提供给调用者一个名为 `ConnPool` 的struct。  
 该struct实现了 `net.Listener` 供服务端调用，同时提供一个 `dial` 方法供客户端建立连接(返回一个 `net.Conn` )。
 
+## TODO
+- [ ] 支持丢包重传
+- [ ] 输入连接可用性检测
+- [ ] 支持配置输入连接权重
+
 ## 快速上手
 ### 安装
 ```shell
@@ -77,4 +82,12 @@ func main(){
   conn.Write([]byte("something"))
 }
 
+```
+### iptables端口转发
+```shell
+echo "net.ipv4.ip_forward = 1" >> /etc/sysctl.conf
+sysctl -p
+iptables -t nat -I POSTROUTING  -j MASQUERADE
+iptables -t nat -I PREROUTING -p tcp --dport 6666 -j DNAT --to-destination 172.31.205.84:5512
+iptables -t nat -I POSTROUTING -d 172.31.205.84 -p tcp --dport 5512 -j SNAT --to-source 172.31.205.83
 ```
