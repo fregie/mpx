@@ -23,7 +23,7 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-
+	mpx.Verbose(true)
 	lis, err := net.Listen("tcp", "0.0.0.0:5512")
 	if err != nil {
 		log.Fatal(err)

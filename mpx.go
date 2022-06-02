@@ -19,6 +19,7 @@ const (
 	Data
 	RST
 	Heartbeat
+	SetWeight
 )
 
 const (
@@ -94,4 +95,15 @@ func NewHeartbeatPacket() *mpxPacket {
 		Length: 0,
 		Data:   []byte{},
 	}
+}
+
+func NewSetWeightPacket(weight uint32) *mpxPacket {
+	p := &mpxPacket{
+		Type:   SetWeight,
+		TunnID: 0,
+		Length: 4,
+		Data:   make([]byte, 4),
+	}
+	binary.BigEndian.PutUint32(p.Data, weight)
+	return p
 }

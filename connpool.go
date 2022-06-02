@@ -2,6 +2,7 @@ package mpx
 
 import (
 	"context"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"io/ioutil"
@@ -11,6 +12,7 @@ import (
 	"os"
 	"runtime"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 )
@@ -35,7 +37,7 @@ func Verbose(enable bool) {
 
 // Dialer 用于建立net.Conn连接
 type Dialer interface {
-	Dial() (net.Conn, error)
+	Dial() (net.Conn, uint32, error)
 }
 
 type Conn struct {
@@ -106,16 +108,26 @@ const (
 	client
 )
 
+type connWithWeight struct {
+	net.Conn
+	weight uint32
+	tx     uint64
+}
+
+func (c *connWithWeight) Write(b []byte) (int, error) {
+	n, err := c.Conn.Write(b)
+	atomic.AddUint64(&c.tx, uint64(n))
+	return n, err
+}
+
 // ConnPool 是使用mpx主要用到的结构体
 // 接受任何实现了 net.Conn 接口的连接作为输入
 // 可以直接调用 AddConn 方法将Conn输入，也可以调用 ServeWithListener 输入一个 net.Listener ，调用 StartWithDialer 输入一个 dailer (mpx库中的一个interface)来使用mpx
 type ConnPool struct {
 	side          side
-	connMap       sync.Map // key: int , value: net.conn
+	connMap       sync.Map // key: int , value: connWithWeight
 	localAddr     net.Addr
 	remoteAddr    net.Addr
-	IDs           []int
-	idMutex       sync.RWMutex
 	tunnMap       sync.Map // key: int , value: Tunnel
 	chanCloseOnce sync.Once
 	sendCh        chan []byte
@@ -131,7 +143,6 @@ type ConnPool struct {
 func NewConnPool() *ConnPool {
 	ctx, cancel := context.WithCancel(context.Background())
 	p := &ConnPool{
-		IDs:       make([]int, 0),
 		sendCh:    make(chan []byte),
 		recvCh:    make(chan *mpxPacket),
 		ctx:       ctx,
@@ -192,6 +203,10 @@ func (p *ConnPool) Connect(data []byte) (*Tunnel, error) {
 
 // AddConn 向ConnPool中添加一个新的net.Conn
 func (p *ConnPool) AddConn(conn net.Conn) error {
+	return p.AddConnWithWeight(conn, 1)
+}
+
+func (p *ConnPool) AddConnWithWeight(conn net.Conn, weight uint32) error {
 	if conn == nil {
 		return errors.New("Conn is nil")
 	}
@@ -199,49 +214,67 @@ func (p *ConnPool) AddConn(conn net.Conn) error {
 	for v, ok := p.connMap.Load(connID); ok && v != nil; {
 		connID = rand.Intn(65535)
 	}
-	p.connMap.Store(connID, conn)
-	p.updateIDs()
+	cw := &connWithWeight{
+		Conn:   conn,
+		weight: weight,
+	}
+	p.connMap.Range(func(key, value interface{}) bool {
+		atomic.StoreUint64(&value.(*connWithWeight).tx, 0)
+		return true
+	})
+	p.connMap.Store(connID, cw)
 	p.localAddr = conn.LocalAddr()
 	p.remoteAddr = conn.RemoteAddr()
-	go p.handleConn(conn, connID)
+	go p.handleConn(cw, connID)
 	debug.Printf("Add connection [%d]", connID)
 
 	return nil
 }
 
-func (p *ConnPool) updateIDs() {
-	p.idMutex.Lock()
-	defer p.idMutex.Unlock()
-	p.IDs = p.IDs[:0]
-	p.connMap.Range(func(k, v interface{}) bool {
-		p.IDs = append(p.IDs, k.(int))
+func (p *ConnPool) ConnCount() int {
+	count := 0
+	p.connMap.Range(func(key, value interface{}) bool {
+		count++
 		return true
 	})
+	return count
 }
 
-func (p *ConnPool) loadRandomID() (int, error) {
-	p.idMutex.RLock()
-	defer p.idMutex.RUnlock()
-	if len(p.IDs) == 0 {
-		return 0, errors.New("No available connection")
+func (p *ConnPool) choseConnByWeight() *connWithWeight {
+	totalWeight := uint32(0)
+	totalTx := uint64(0)
+	var conn *connWithWeight
+	p.connMap.Range(func(key, value interface{}) bool {
+		cv := value.(*connWithWeight)
+		totalWeight += atomic.LoadUint32(&cv.weight)
+		totalTx += atomic.LoadUint64(&cv.tx)
+		return true
+	})
+	if totalWeight == 0 {
+		return nil
 	}
-	return p.IDs[rand.Intn(len(p.IDs))], nil
+	p.connMap.Range(func(key, value interface{}) bool {
+		cv := value.(*connWithWeight)
+		if conn == nil {
+			conn = cv
+		}
+		if totalTx <= 0 || float32(atomic.LoadUint64(&cv.tx))/float32(totalTx) <= float32(atomic.LoadUint32(&cv.weight))/float32(totalWeight) {
+			conn = cv
+			return false
+		}
+		return true
+	})
+	return conn
 }
 
-func (p *ConnPool) IDCount() int {
-	p.idMutex.RLock()
-	defer p.idMutex.RUnlock()
-	return len(p.IDs)
-}
-
-func (p *ConnPool) handleConn(conn net.Conn, id int) {
+func (p *ConnPool) handleConn(conn *connWithWeight, id int) {
 	defer func() {
 		if v := recover(); v != nil {
 			debug.Println("capture a panic:", v)
 		}
 		conn.Close()
 		p.connMap.Delete(id)
-		p.updateIDs()
+		debug.Printf("[%s]Totally send %d bytes", conn.RemoteAddr().String(), atomic.LoadUint64(&conn.tx))
 	}()
 	connCtx, cancel := context.WithCancel(p.ctx)
 	defer cancel()
@@ -253,12 +286,17 @@ func (p *ConnPool) handleConn(conn net.Conn, id int) {
 	}()
 	lastHeartBeat := time.Now()
 	go func() {
-		ticker := time.NewTicker(2 * time.Second)
+		defer conn.Close()
+		ticker := time.NewTicker(1 * time.Second)
 		for range ticker.C {
 			_, err := conn.Write(NewHeartbeatPacket().Pack())
 			if err != nil {
-				debug.Printf("read err:%s", err)
-				conn.Close()
+				debug.Printf("Write err:%s", err)
+				break
+			}
+			_, err = conn.Write(NewSetWeightPacket(atomic.LoadUint32(&conn.weight)).Pack())
+			if err != nil {
+				debug.Printf("Write err:%s", err)
 				break
 			}
 		}
@@ -281,10 +319,15 @@ func (p *ConnPool) handleConn(conn net.Conn, id int) {
 			debug.Printf("read err:%s", err)
 			break
 		}
-		if packet.Type == Heartbeat {
+		switch packet.Type {
+		case Heartbeat:
 			lastHeartBeat = time.Now()
 			// log.Printf("Heartbeat")
 			enableHeartbeat = true
+			continue
+		case SetWeight:
+			weight := binary.BigEndian.Uint32(packet.Data)
+			atomic.StoreUint32(&conn.weight, weight)
 			continue
 		}
 		p.recvCh <- packet
@@ -302,12 +345,15 @@ func (p *ConnPool) receiver() {
 			if !ok {
 				return
 			}
-			debug.Printf("[%d] receive: seq[%d]", packet.TunnID, packet.Seq)
 			var tunn *tunnInfo
 			tunnel, ok := p.tunnMap.Load(packet.TunnID)
 			if !ok || tunnel == nil {
 				if p.side == client {
 					debug.Printf("[%d] drop deq[%d]", packet.TunnID, packet.Seq)
+					_, err := p.send(NewRSTPacket(packet.TunnID, nil).Pack())
+					if err != nil {
+						log.Printf("send packet failed: %s", err)
+					}
 					continue
 				}
 				debug.Printf("New tunn")
@@ -324,6 +370,9 @@ func (p *ConnPool) receiver() {
 				tunn = tunnel.(*tunnInfo)
 			}
 			switch packet.Type {
+			case RST:
+				debug.Printf("[%d] RST", packet.TunnID)
+				tunn.Tunnel.Close()
 			case Connect:
 				if len(packet.Data) > 0 {
 					tunn.receiveData(packet)
@@ -346,6 +395,7 @@ func (p *ConnPool) receiver() {
 				}
 				tunn.closeAt = packet.Seq
 			case Data:
+				// debug.Printf("[%d] receive: seq[%d]", packet.TunnID, packet.Seq)
 				if packet.Seq == tunn.Ack {
 					tunn.receiveData(packet)
 					if tunn.unInputedCount > 0 {
@@ -428,11 +478,11 @@ func (p *ConnPool) StartWithDialer(dialer Dialer, connNum int) (err error) {
 	go p.writer()
 	go p.receiver()
 
-	conn, err := dialer.Dial()
+	conn, weight, err := dialer.Dial()
 	if err != nil {
 		log.Printf("Dail failed: %s", err)
 	} else {
-		err = p.AddConn(conn)
+		err = p.AddConnWithWeight(conn, weight)
 		if err != nil {
 			log.Printf("AddConn failed: %s", err)
 		}
@@ -446,14 +496,14 @@ func (p *ConnPool) StartWithDialer(dialer Dialer, connNum int) (err error) {
 			case <-p.ctx.Done():
 				return
 			case <-ticker.C:
-				toAdd := connNum - p.IDCount()
+				toAdd := connNum - p.ConnCount()
 				for i := 0; i < toAdd; i++ {
-					conn, e := dialer.Dial()
+					conn, weight, e := dialer.Dial()
 					if e != nil {
 						log.Printf("Dail failed: %s", e)
 						continue
 					}
-					e = p.AddConn(conn)
+					e = p.AddConnWithWeight(conn, weight)
 					if e != nil {
 						log.Printf("AddConn failed: %s", e)
 						continue
@@ -488,7 +538,7 @@ func (p *ConnPool) Close() error {
 func (p *ConnPool) Addr() net.Addr {
 	var addr net.Addr
 	p.connMap.Range(func(k, v interface{}) bool {
-		addr = v.(net.Conn).LocalAddr()
+		addr = v.(*connWithWeight).LocalAddr()
 		return false
 	})
 	if addr == nil {
@@ -517,17 +567,13 @@ func (p *ConnPool) send(buf []byte) (int, error) {
 	if buf == nil || len(buf) == 0 {
 		return 0, errors.New("buffer is nil or empty")
 	}
-	connID, err := p.loadRandomID()
-	if err != nil {
-		return 0, err
+	conn := p.choseConnByWeight()
+	if conn == nil {
+		return 0, fmt.Errorf("connection not found")
 	}
-	conn, ok := p.connMap.Load(connID)
-	if !ok || conn == nil {
-		return 0, fmt.Errorf("Connection [%d] not found", connID)
-	}
-	n, err := conn.(net.Conn).Write(buf)
+	n, err := conn.Write(buf)
 	if err != nil {
-		conn.(net.Conn).Close()
+		conn.Close()
 	}
 	return n, err
 }

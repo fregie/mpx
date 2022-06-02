@@ -88,6 +88,6 @@ func main(){
 echo "net.ipv4.ip_forward = 1" >> /etc/sysctl.conf
 sysctl -p
 iptables -t nat -I POSTROUTING  -j MASQUERADE
-iptables -t nat -I PREROUTING -p tcp --dport 6666 -j DNAT --to-destination 172.31.205.84:5512
-iptables -t nat -I POSTROUTING -d 172.31.205.84 -p tcp --dport 5512 -j SNAT --to-source 172.31.205.83
+iptables -t nat -I PREROUTING -p tcp --dport 6666 -j DNAT --to-destination 10.0.4.7:5512
+iptables -t nat -I POSTROUTING -d 10.0.4.7 -p tcp --dport 5512 -j SNAT --to-source 10.0.4.2
 ```
