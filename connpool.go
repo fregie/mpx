@@ -22,7 +22,8 @@ var (
 )
 
 var (
-	MaxCachedNum = 65535
+	MaxCachedNum         = 65535
+	defualtTunnelTimeout = time.Second * 10
 	// debug        = log.New(ioutil.Discard, "[MPX debug] ", log.Ldate|log.Ltime|log.Lshortfile)
 	debug = log.New(ioutil.Discard, "[MPX Debug] ", log.Ldate|log.Ltime|log.Lshortfile)
 )
@@ -413,11 +414,27 @@ func (p *ConnPool) receiver() {
 					if err != nil {
 						log.Printf("send packet failed: %s", err)
 					}
+					tunn.Tunnel.Close()
+					p.tunnMap.Delete(tunn.ID)
 					goto CONTINUE
 				}
 			}
 		CONTINUE:
 		}
+	}
+}
+
+func (p *ConnPool) timeoutTunnelCleaner(interval time.Duration) {
+	ticker := time.NewTicker(interval)
+	for range ticker.C {
+		p.tunnMap.Range(func(key, value interface{}) bool {
+			tunnel := value.(*tunnInfo)
+			if time.Now().After(tunnel.LastSeen().Add(defualtTunnelTimeout)) {
+				tunnel.Close()
+				p.tunnMap.Delete(tunnel.ID)
+			}
+			return true
+		})
 	}
 }
 
@@ -428,6 +445,7 @@ func (p *ConnPool) Serve() error {
 	p.running = true
 	defer func() { p.running = false }()
 	go p.writer()
+	go p.timeoutTunnelCleaner(10 * time.Second)
 	p.receiver()
 	return nil
 }
@@ -444,6 +462,7 @@ func (p *ConnPool) ServeWithListener(lis net.Listener) error {
 	defer func() { p.running = false }()
 	go p.writer()
 	go p.receiver()
+	go p.timeoutTunnelCleaner(10 * time.Second)
 	connCh := make(chan net.Conn)
 	go func() {
 		for {
@@ -477,6 +496,7 @@ func (p *ConnPool) StartWithDialer(dialer Dialer, connNum int) (err error) {
 	p.running = true
 	go p.writer()
 	go p.receiver()
+	go p.timeoutTunnelCleaner(10 * time.Second)
 
 	conn, weight, err := dialer.Dial()
 	if err != nil {

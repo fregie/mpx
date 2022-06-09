@@ -5,12 +5,13 @@ import (
 	"errors"
 	"io"
 	"net"
+	"sync/atomic"
 	"syscall"
 	"time"
 )
 
 const (
-	defaultBufferSize = 256
+	defaultBufferSize = 4096
 )
 
 type state int
@@ -32,6 +33,7 @@ type Tunnel struct {
 	leftover    []byte
 	state       state
 	writer      *tunnelWriter
+	lastSeen    int64
 }
 
 func newTunnel(id uint32, la, ra net.Addr, writer *tunnelWriter) *Tunnel {
@@ -53,21 +55,20 @@ func newTunnel(id uint32, la, ra net.Addr, writer *tunnelWriter) *Tunnel {
 }
 
 func (t *Tunnel) input(data []byte) {
-	// newBuffer := make([]byte, len(data))
-	// copy(newBuffer, data)
-	// t.readChMutex.Lock()
-	// defer t.readChMutex.Unlock()
-	// if t.state != Closed {
-	// 	if t.isReading {
+	if t.state == Closed {
+		return
+	}
+	if len(t.reciver) == cap(t.reciver) {
+		debug.Printf("[%d]recv channel full", t.ID)
+		t.Close()
+		return
+	}
 	t.reciver <- data
-	// } else {
-	// 	Debug.Printf("[%d]to leftover", t.ID)
-	// 	t.leftover = append(t.leftover, data...)
-	// }
-	// }
+
 }
 
 func (t *Tunnel) Read(buf []byte) (int, error) {
+	defer atomic.StoreInt64(&t.lastSeen, time.Now().UnixNano())
 	if t.state == Closed && len(t.leftover) == 0 && len(t.reciver) == 0 {
 		debug.Printf("[%d]EOF", t.ID)
 		return 0, io.EOF
@@ -75,13 +76,15 @@ func (t *Tunnel) Read(buf []byte) (int, error) {
 	if buf == nil {
 		return 0, errors.New("buf is nil")
 	}
+	ctx, cancel := context.WithTimeout(t.readCtx, 5*time.Second)
+	defer cancel()
 	if len(t.leftover) == 0 {
 		select {
 		case new := <-t.reciver:
 			n := copy(buf, new)
 			t.leftover = new[n:]
 			return n, nil
-		case <-t.readCtx.Done():
+		case <-ctx.Done():
 			if t.state == Closed {
 				debug.Printf("[%d]EOF", t.ID)
 				return 0, io.EOF
@@ -102,6 +105,7 @@ func (t *Tunnel) Read(buf []byte) (int, error) {
 // Write can be made to time out and return an Error with Timeout() == true
 // after a fixed time limit; see SetDeadline and SetWriteDeadline.
 func (t *Tunnel) Write(b []byte) (n int, err error) {
+	defer atomic.StoreInt64(&t.lastSeen, time.Now().UnixNano())
 	if t.state == Closed {
 		return 0, errors.New("closed")
 	}
@@ -201,4 +205,8 @@ func (t *Tunnel) SetWriteDeadline(ti time.Time) error {
 		})
 	}
 	return nil
+}
+
+func (t *Tunnel) LastSeen() time.Time {
+	return time.Unix(0, atomic.LoadInt64(&t.lastSeen))
 }

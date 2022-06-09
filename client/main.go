@@ -9,7 +9,9 @@ import (
 
 	"github.com/fregie/mpx"
 	"github.com/fregie/mpx/dialer"
-	"github.com/shadowsocks/go-shadowsocks2/core"
+
+	"net/http"
+	_ "net/http/pprof"
 )
 
 const (
@@ -18,8 +20,10 @@ const (
 )
 
 var (
-	remoteAddr = flag.String("s", "0.0.0.0", "")
-	coNum      = flag.Int("p", 2, "")
+	remoteAddr  = flag.String("s", "0.0.0.0", "")
+	coNum       = flag.Int("p", 2, "")
+	serverAddr  = flag.String("l", "0.0.0.0:5513", "")
+	enablePprof = flag.Bool("pprof", false, "")
 )
 
 type mpxConnecter struct {
@@ -31,10 +35,13 @@ func (m *mpxConnecter) ServerHost() string         { return "" }
 
 func main() {
 	flag.Parse()
-	ciph, err := core.PickCipher(ssMethod, []byte{}, ssPassword)
-	if err != nil {
-		log.Fatal(err)
+	if *enablePprof {
+		go http.ListenAndServe("0.0.0.0:6060", nil)
 	}
+	// ciph, err := core.PickCipher(ssMethod, []byte{}, ssPassword)
+	// if err != nil {
+	// 	log.Fatal(err)
+	// }
 	servers := strings.Split(*remoteAddr, ",")
 	remoteAddrs := make([]dialer.ServerWithWeight, 0, len(servers))
 	for _, server := range servers {
@@ -56,8 +63,45 @@ func main() {
 	mpx.Verbose(true)
 	cp := mpx.NewConnPool()
 	cp.StartWithDialer(d, *coNum)
-	client := &Client{}
 	connecter := &mpxConnecter{ConnPool: cp}
+	// client := &Client{}
+	// go &Client{}.StartsocksConnLocal("0.0.0.0:1081", connecter, ciph.StreamConn)
 
-	client.StartsocksConnLocal("127.0.0.1:1080", connecter, ciph.StreamConn)
+	// ssDailer := ShadowsocksDialer(connecter, ciph.StreamConn)
+
+	lis, err := net.Listen("tcp", *serverAddr)
+	if err != nil {
+		log.Fatal(err)
+	}
+	log.Printf("Start at %s", lis.Addr().String())
+	for {
+		c, err := lis.Accept()
+		if err != nil {
+			log.Print(err)
+			continue
+		}
+		go func() {
+			defer c.Close()
+			// sc := ciph.StreamConn(c)
+			// tgt, err := socks.ReadAddr(sc)
+			// if err != nil {
+			// 	log.Printf("failed to get target address: %v", err)
+			// 	return
+			// }
+			// rc, err := ssDailer("tcp", tgt.String())
+			// if err != nil {
+			// 	log.Printf("failed to connect to target: %v", err)
+			// 	return
+			// }
+			// defer rc.Close()
+			rc, err := connecter.Connect()
+			if err != nil {
+				log.Printf("failed to connect to target: %v", err)
+			}
+			_, _, err = relay(c, rc)
+			if err != nil {
+				log.Printf("relay error: %v", err)
+			}
+		}()
+	}
 }

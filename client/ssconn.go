@@ -50,7 +50,7 @@ func (c *Client) StartsocksConnLocal(addr string, connecter Connecter, shadow sh
 			continue
 		}
 		lc.(*net.TCPConn).SetKeepAlive(true)
-		go c.handleConn(lc, connecter, shadow)
+		go handleConn(lc, connecter, shadow)
 	}
 	return nil
 }
@@ -70,7 +70,29 @@ func (c *Client) StopsocksConnLocal() error {
 	return nil
 }
 
-func (c *Client) handleConn(lc net.Conn, connecter Connecter, shadow shadowUpgrade) {
+type Dial func(network, addr string) (net.Conn, error)
+
+func ShadowsocksDialer(connecter Connecter, shadow shadowUpgrade) Dial {
+	return func(network, addr string) (net.Conn, error) {
+		if network != "tcp" && network != "tcp4" && network != "tcp6" {
+			return nil, errors.New("only support tcp")
+		}
+		tgt := socks.ParseAddr(addr)
+		log.Printf("target: %s", tgt)
+		rc, err := connecter.Connect()
+		if err != nil {
+			return nil, fmt.Errorf("Connect to %s failed: %s", connecter.ServerHost(), err)
+		}
+		defer rc.Close()
+		rc = shadow(rc)
+		if _, err = rc.Write(tgt); err != nil {
+			return nil, fmt.Errorf("failed to send target address: %v", err)
+		}
+		return rc, nil
+	}
+}
+
+func handleConn(lc net.Conn, connecter Connecter, shadow shadowUpgrade) {
 	defer lc.Close()
 	tgt, err := socks.Handshake(lc)
 	if err != nil {
