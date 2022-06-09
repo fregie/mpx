@@ -1,30 +1,30 @@
 package main
 
 import (
+	"flag"
 	"io"
 	"log"
 	"net"
 	"time"
 
-	"github.com/shadowsocks/go-shadowsocks2/core"
-	"github.com/shadowsocks/go-shadowsocks2/socks"
-
 	"github.com/fregie/mpx"
 )
 
-const (
-	ssMethod   = "aes-256-gcm"
-	ssPassword = "q92H92qreL1MAu9u"
+var (
+	ListenAddr = flag.String("l", "0.0.0.0:5512", "listen address")
+	targetAddr = flag.String("target", "", "target address")
+	verbose    = flag.Bool("v", false, "verbose")
 )
 
 func main() {
+	flag.Parse()
 	log.SetFlags(log.Ldate | log.Ltime | log.Lshortfile)
-	ciph, err := core.PickCipher(ssMethod, []byte{}, ssPassword)
-	if err != nil {
+	mpx.Verbose(*verbose)
+	target, err := net.ResolveTCPAddr("tcp", *targetAddr)
+	if err != err {
 		log.Fatal(err)
 	}
-	mpx.Verbose(true)
-	lis, err := net.Listen("tcp", "0.0.0.0:5512")
+	lis, err := net.Listen("tcp", *ListenAddr)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -43,23 +43,14 @@ func main() {
 		}
 		go func() {
 			defer tunn.Close()
-			conn := ciph.StreamConn(tunn)
-			tgt, err := socks.ReadAddr(conn)
-			if err != nil {
-				log.Printf("failed to get target address: %v", err)
+			log.Printf("dial to %s", *targetAddr)
+			rc, err := net.DialTCP("tcp", nil, target)
+			if err != nil || rc == nil {
+				log.Printf("failed to connect to target[%s]: %v", *targetAddr, err)
 				return
 			}
-			var rcc net.Conn
-			log.Printf("dial to %s", tgt.String())
-			rcc, err = net.Dial("tcp4", tgt.String())
-			if err != nil || rcc == nil {
-				log.Printf("failed to connect to target[%s]: %v", tgt.String(), err)
-				return
-			}
-			rc := rcc.(*net.TCPConn)
-			defer rc.Close()
 			rc.SetKeepAlive(true)
-			_, _, err = relay(conn, rcc)
+			_, _, err = relay(tunn, rc)
 			if err != nil {
 				log.Print(err)
 				return

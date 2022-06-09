@@ -14,11 +14,6 @@ import (
 	_ "net/http/pprof"
 )
 
-const (
-	ssMethod   = "aes-256-gcm"
-	ssPassword = "q92H92qreL1MAu9u"
-)
-
 var (
 	remoteAddr  = flag.String("s", "0.0.0.0", "")
 	coNum       = flag.Int("p", 2, "")
@@ -38,10 +33,6 @@ func main() {
 	if *enablePprof {
 		go http.ListenAndServe("0.0.0.0:6060", nil)
 	}
-	// ciph, err := core.PickCipher(ssMethod, []byte{}, ssPassword)
-	// if err != nil {
-	// 	log.Fatal(err)
-	// }
 	servers := strings.Split(*remoteAddr, ",")
 	remoteAddrs := make([]dialer.ServerWithWeight, 0, len(servers))
 	for _, server := range servers {
@@ -64,10 +55,6 @@ func main() {
 	cp := mpx.NewConnPool()
 	cp.StartWithDialer(d, *coNum)
 	connecter := &mpxConnecter{ConnPool: cp}
-	// client := &Client{}
-	// go &Client{}.StartsocksConnLocal("0.0.0.0:1081", connecter, ciph.StreamConn)
-
-	// ssDailer := ShadowsocksDialer(connecter, ciph.StreamConn)
 
 	lis, err := net.Listen("tcp", *serverAddr)
 	if err != nil {
@@ -82,18 +69,6 @@ func main() {
 		}
 		go func() {
 			defer c.Close()
-			// sc := ciph.StreamConn(c)
-			// tgt, err := socks.ReadAddr(sc)
-			// if err != nil {
-			// 	log.Printf("failed to get target address: %v", err)
-			// 	return
-			// }
-			// rc, err := ssDailer("tcp", tgt.String())
-			// if err != nil {
-			// 	log.Printf("failed to connect to target: %v", err)
-			// 	return
-			// }
-			// defer rc.Close()
 			rc, err := connecter.Connect()
 			if err != nil {
 				log.Printf("failed to connect to target: %v", err)
