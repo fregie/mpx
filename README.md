@@ -14,12 +14,13 @@
 * 聚合多个IP/服务器，同时聚合带宽，多个低带宽服务器聚合成高带宽
 * 某些情况下聚合多条TCP连接可以提高峰值带宽
 
-### 使用 mpx-tunnel
+## 使用 mpx-tunnel
 mpx-tunnel使用多个TCP连接承载
-#### 编译
+
+### 源码编译安装部署
+#### 安装
 ```bash
-go build client -o mpx-cli
-go build server -o mpx-ser
+go install github.com/fregie/mpx/mpx-tunnel@latest
 ```
 #### 服务端
 以go-shadowsocks2举例，首先在服务器启动ss服务端:
@@ -28,13 +29,24 @@ go-shadowsocks2 -s 'ss://AEAD_CHACHA20_POLY1305:your-password@:8488' -verbose
 ```
 在服务器启动mpx server,转发连接到ss服务端端口
 ```bash
-mpx-ser -l 0.0.0.0:5512 -target 127.0.0.1:8848
+# 指定target则为服务端
+mpx-tunnel -listen 0.0.0.0:5512 -target 127.0.0.1:8848
+```
+或使用docker部署
+```bash
+docker run -d --restart=always --name mpx -p 5512:5512 -e LISTEN_ADDR="0.0.0.0:5512" -e TARGET_ADDR="127.0.0.1:8848" fregie/mpx:latest
 ```
 #### 客户端
 启动mpx client
 ```bash
-mpx-cli -l 0.0.0.0:5513 -s server-ip:5512 -p 4
+# 指定server则为客户端 
+mpx-tunnel -listen 0.0.0.0:5513 --server server-ip:5512 -p 4
 ```
+或使用docker部署
+```bash
+docker run -d --restart=always --name mpx -p 5512:5512 -e LISTEN_ADDR="0.0.0.0:5512" -e SERVER_ADDR="server-ip:5512" fregie/mpx:latest
+```
+
 `-p`:配置保持的长连接数量  
 启动ss客户端
 ```bash
@@ -54,7 +66,9 @@ iptables -t nat -I POSTROUTING -d private-ip-1 -p tcp --dport 5512 -j SNAT --to-
 ```
 3. 在客户端使用以下命令启动`mpx-cli`:
 ```bash
-mpx-cli -l 0.0.0.0:5513 -s "public-ip-1:5512|2,public-ip-2:6666|2" -p 4
+mpx-tunnel -listen 0.0.0.0:5513 -server "public-ip-1:5512|2,public-ip-2:6666|2" -p 4
+# 使用docker部署
+docker run -d --restart=always --name mpx -p 5512:5512 -e LISTEN_ADDR="0.0.0.0:5512" -e SERVER_ADDR="public-ip-1:5512|2,public-ip-2:6666" fregie/mpx:latest
 ```
 `-s`: 使用`,`分割不同服务端，`|`前为服务端地址`ip:port`,`|`之后为权重，会根据其权重来分配对应地址承载的带宽。例如你有一台30m和一台60m的服务器，那你应该将其权重配为`1:2`
 
