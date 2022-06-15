@@ -76,7 +76,7 @@ func (t *Tunnel) Read(buf []byte) (int, error) {
 	if buf == nil {
 		return 0, errors.New("buf is nil")
 	}
-	ctx, cancel := context.WithTimeout(t.readCtx, 5*time.Second)
+	ctx, cancel := context.WithTimeout(t.readCtx, 10*time.Second)
 	defer cancel()
 	if len(t.leftover) == 0 {
 		select {

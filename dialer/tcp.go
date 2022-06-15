@@ -86,8 +86,13 @@ func (d *TCPmultiDialer) Dial() (net.Conn, uint32, error) {
 			}
 		}
 	}
-
-	conn, err := net.Dial("tcp", addr)
+	tcpAddr, err := net.ResolveTCPAddr("tcp", addr)
+	if err != nil {
+		return nil, 0, err
+	}
+	conn, err := net.DialTCP("tcp", nil, tcpAddr)
+	conn.SetKeepAlive(true)
+	conn.SetNoDelay(true)
 	mc := &TCPmultiConn{
 		Conn:       conn,
 		weight:     weight,

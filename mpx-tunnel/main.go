@@ -61,7 +61,6 @@ func runClient(localAddr, remoteAddr string, concurrentNum int) {
 		}
 	}
 	d := dialer.NewTCPmultiDialer(remoteAddrs)
-	mpx.Verbose(true)
 	cp := mpx.NewConnPool()
 	cp.StartWithDialer(d, concurrentNum)
 	lis, err := net.Listen("tcp", localAddr)
