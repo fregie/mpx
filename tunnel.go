@@ -11,7 +11,7 @@ import (
 )
 
 const (
-	defaultBufferSize = 4096
+	defaultTunnelBufferSize = 4096
 )
 
 type state int
@@ -42,7 +42,7 @@ func newTunnel(id uint32, la, ra net.Addr, writer *tunnelWriter) *Tunnel {
 	return &Tunnel{
 		ID:          id,
 		leftover:    make([]byte, 0),
-		reciver:     make(chan []byte, defaultBufferSize),
+		reciver:     make(chan []byte, defaultTunnelBufferSize),
 		readCtx:     readctx,
 		readCancel:  readcancel,
 		writeCtx:    writectx,

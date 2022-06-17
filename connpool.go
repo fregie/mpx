@@ -1,6 +1,7 @@
 package mpx
 
 import (
+	"container/list"
 	"context"
 	"encoding/binary"
 	"errors"
@@ -18,14 +19,16 @@ import (
 )
 
 var (
-	EClosed = errors.New("closed")
+	ErrClosed = errors.New("closed")
 )
 
 var (
-	MaxCachedNum         = 65535
-	defualtTunnelTimeout = time.Second * 10
-	// debug        = log.New(ioutil.Discard, "[MPX debug] ", log.Ldate|log.Ltime|log.Lshortfile)
-	debug = log.New(ioutil.Discard, "[MPX Debug] ", log.Ldate|log.Ltime|log.Lshortfile)
+	MaxCachedNum             = 65535
+	defaultTunnelTimeout     = time.Second * 10
+	defaultPacketsBufferSize = 4096
+	defaultRetransmitCount   = 1000
+	defaultRetransmitTimeout = 500 * time.Millisecond
+	debug                    = log.New(ioutil.Discard, "[MPX Debug] ", log.Ldate|log.Ltime|log.Lshortfile)
 )
 
 func Verbose(enable bool) {
@@ -55,6 +58,11 @@ type tunnInfo struct {
 	closeAt        uint32
 }
 
+type packetWithtime struct {
+	*mpxPacket
+	time time.Time
+}
+
 func (t *tunnInfo) receiveData(p *mpxPacket) {
 	debug.Printf("[%d] input seq[%d]", t.ID, p.Seq)
 	t.input(p.Data)
@@ -64,8 +72,7 @@ func (t *tunnInfo) receiveData(p *mpxPacket) {
 func (t *tunnInfo) cache(packet *mpxPacket) (needRST bool) {
 	_, loaded := t.unInputed.LoadOrStore(packet.Seq, packet)
 	if loaded {
-		debug.Printf("RST cause chong fu")
-		return true
+		return false
 	}
 	// Debug.Printf("[%d] cache seq[%d]", t.ID, packet.Seq)
 	t.unInputedCount++
@@ -125,30 +132,39 @@ func (c *connWithWeight) Write(b []byte) (int, error) {
 // 接受任何实现了 net.Conn 接口的连接作为输入
 // 可以直接调用 AddConn 方法将Conn输入，也可以调用 ServeWithListener 输入一个 net.Listener ，调用 StartWithDialer 输入一个 dailer (mpx库中的一个interface)来使用mpx
 type ConnPool struct {
-	side          side
-	connMap       sync.Map // key: int , value: connWithWeight
-	localAddr     net.Addr
-	remoteAddr    net.Addr
-	tunnMap       sync.Map // key: int , value: Tunnel
-	chanCloseOnce sync.Once
-	sendCh        chan []byte
-	recvCh        chan *mpxPacket
-	acceptCh      chan *Tunnel
-	running       bool
-	ctx           context.Context
-	ctxCancel     context.CancelFunc
-	dialer        Dialer
+	side              side
+	connMap           sync.Map // key: int , value: connWithWeight
+	localAddr         net.Addr
+	remoteAddr        net.Addr
+	tunnMap           sync.Map // key: int , value: Tunnel
+	chanCloseOnce     sync.Once
+	sendCh            chan *mpxPacket
+	recvCh            chan *mpxPacket
+	acceptCh          chan *Tunnel
+	maxBufferSize     int
+	retransmitCount   int
+	retransmitTimeout time.Duration
+	bufferLock        sync.Mutex
+	packetsBuffer     *list.List
+	packetMap         map[uint64]*list.Element
+	ctx               context.Context
+	ctxCancel         context.CancelFunc
 }
 
 // NewConnPool 创建一个新的 *ConnPool
 func NewConnPool() *ConnPool {
 	ctx, cancel := context.WithCancel(context.Background())
 	p := &ConnPool{
-		sendCh:    make(chan []byte),
-		recvCh:    make(chan *mpxPacket),
-		ctx:       ctx,
-		ctxCancel: cancel,
-		acceptCh:  make(chan *Tunnel),
+		sendCh:            make(chan *mpxPacket),
+		recvCh:            make(chan *mpxPacket),
+		ctx:               ctx,
+		ctxCancel:         cancel,
+		acceptCh:          make(chan *Tunnel),
+		maxBufferSize:     defaultPacketsBufferSize,
+		packetsBuffer:     list.New(),
+		packetMap:         make(map[uint64]*list.Element),
+		retransmitCount:   defaultRetransmitCount,
+		retransmitTimeout: defaultRetransmitTimeout,
 	}
 	return p
 }
@@ -160,7 +176,7 @@ func (p *ConnPool) Accept() (*Tunnel, error) {
 	case tunn := <-p.acceptCh:
 		return tunn, nil
 	case <-p.ctx.Done():
-		return nil, EClosed
+		return nil, ErrClosed
 	}
 }
 
@@ -192,7 +208,7 @@ func (p *ConnPool) Connect(data []byte) (*Tunnel, error) {
 		Length: uint32(len(data)),
 		Data:   data,
 	}
-	p.sendCh <- packet.Pack()
+	p.sendCh <- packet
 	tunn := newTunnel(packet.TunnID, p.localAddr, p.remoteAddr, &tunnelWriter{
 		TunnID: packet.TunnID,
 		Seq:    packet.Length,
@@ -280,10 +296,8 @@ func (p *ConnPool) handleConn(conn *connWithWeight, id int) {
 	connCtx, cancel := context.WithCancel(p.ctx)
 	defer cancel()
 	go func() {
-		select {
-		case <-connCtx.Done():
-			conn.Close()
-		}
+		<-connCtx.Done()
+		conn.Close()
 	}()
 	lastHeartBeat := time.Now()
 	go func() {
@@ -304,7 +318,7 @@ func (p *ConnPool) handleConn(conn *connWithWeight, id int) {
 	}()
 	enableHeartbeat := false
 	go func() {
-		checkDuration := 3 * time.Second
+		checkDuration := 5 * time.Second
 		timer := time.NewTimer(checkDuration)
 		for range timer.C {
 			if enableHeartbeat && time.Now().After(lastHeartBeat.Add(checkDuration)) {
@@ -335,6 +349,33 @@ func (p *ConnPool) handleConn(conn *connWithWeight, id int) {
 	}
 }
 
+func (p *ConnPool) retransmiter() {
+	ticker := time.NewTicker(1 * time.Second)
+	for {
+		select {
+		case <-ticker.C:
+			p.bufferLock.Lock()
+			now := time.Now()
+			toSend := make([]*list.Element, 0)
+			for ele := p.packetsBuffer.Front(); ele != nil; ele = ele.Next() {
+				pwt := ele.Value.(*packetWithtime)
+				if now.After(pwt.time.Add(p.retransmitTimeout)) {
+					toSend = append(toSend, ele)
+				}
+			}
+			for _, ele := range toSend {
+				p.packetsBuffer.MoveToBack(ele)
+			}
+			p.bufferLock.Unlock()
+			for _, ele := range toSend {
+				p.sendCh <- ele.Value.(*packetWithtime).mpxPacket
+			}
+		case <-p.ctx.Done():
+			return
+		}
+	}
+}
+
 func (p *ConnPool) receiver() {
 	for {
 		select {
@@ -346,15 +387,44 @@ func (p *ConnPool) receiver() {
 			if !ok {
 				return
 			}
+			switch packet.Type {
+			case Data:
+				fallthrough
+			case Connect:
+				ackPkt := NewAckPacket(packet.TunnID, packet.Seq, packet.Length)
+				p.sendCh <- ackPkt
+			case ACK:
+				toReSend := make([]*list.Element, 0)
+				p.bufferLock.Lock()
+				ackEle, ok := p.packetMap[packet.PacketID()]
+				if ok {
+					count := 0
+					for ele := ackEle.Prev(); ele != nil; ele = ele.Prev() {
+						count++
+						if count <= p.retransmitCount {
+							continue
+						}
+						toReSend = append(toReSend, ele)
+					}
+					p.packetsBuffer.Remove(ackEle)
+					delete(p.packetMap, packet.PacketID())
+					for _, ele := range toReSend {
+						p.packetsBuffer.MoveToBack(ele)
+					}
+				}
+				p.bufferLock.Unlock()
+				for _, ele := range toReSend {
+					p.sendCh <- ele.Value.(*packetWithtime).mpxPacket
+				}
+				continue
+			}
+			// 处理tunnel
 			var tunn *tunnInfo
 			tunnel, ok := p.tunnMap.Load(packet.TunnID)
 			if !ok || tunnel == nil {
 				if p.side == client {
 					debug.Printf("[%d] drop deq[%d]", packet.TunnID, packet.Seq)
-					_, err := p.send(NewRSTPacket(packet.TunnID, nil).Pack())
-					if err != nil {
-						log.Printf("send packet failed: %s", err)
-					}
+					p.sendCh <- NewRSTPacket(packet.TunnID, nil)
 					continue
 				}
 				debug.Printf("New tunn")
@@ -397,6 +467,9 @@ func (p *ConnPool) receiver() {
 				tunn.closeAt = packet.Seq
 			case Data:
 				// debug.Printf("[%d] receive: seq[%d]", packet.TunnID, packet.Seq)
+				if packet.Seq < tunn.Ack {
+					goto CONTINUE
+				}
 				if packet.Seq == tunn.Ack {
 					tunn.receiveData(packet)
 					if tunn.unInputedCount > 0 {
@@ -410,10 +483,7 @@ func (p *ConnPool) receiver() {
 				}
 				needRST := tunn.cache(packet)
 				if needRST {
-					_, err := p.send(NewRSTPacket(packet.TunnID, nil).Pack())
-					if err != nil {
-						log.Printf("send packet failed: %s", err)
-					}
+					p.sendCh <- NewRSTPacket(packet.TunnID, nil)
 					tunn.Tunnel.Close()
 					p.tunnMap.Delete(tunn.ID)
 					goto CONTINUE
@@ -429,7 +499,7 @@ func (p *ConnPool) timeoutTunnelCleaner(interval time.Duration) {
 	for range ticker.C {
 		p.tunnMap.Range(func(key, value interface{}) bool {
 			tunnel := value.(*tunnInfo)
-			if time.Now().After(tunnel.LastSeen().Add(defualtTunnelTimeout)) {
+			if time.Now().After(tunnel.LastSeen().Add(defaultTunnelTimeout)) {
 				tunnel.Close()
 				p.tunnMap.Delete(tunnel.ID)
 			}
@@ -442,10 +512,9 @@ func (p *ConnPool) timeoutTunnelCleaner(interval time.Duration) {
 // 如果已经调用 ServeWithListener 或 StartWithDialer，请勿调用该方法
 func (p *ConnPool) Serve() error {
 	p.side = server
-	p.running = true
-	defer func() { p.running = false }()
 	go p.writer()
 	go p.timeoutTunnelCleaner(10 * time.Second)
+	go p.retransmiter()
 	p.receiver()
 	return nil
 }
@@ -458,10 +527,9 @@ func (p *ConnPool) ServeWithListener(lis net.Listener) error {
 	}
 	defer lis.Close()
 	p.side = server
-	p.running = true
-	defer func() { p.running = false }()
 	go p.writer()
 	go p.receiver()
+	go p.retransmiter()
 	go p.timeoutTunnelCleaner(10 * time.Second)
 	connCh := make(chan net.Conn)
 	go func() {
@@ -493,9 +561,9 @@ func (p *ConnPool) ServeWithListener(lis net.Listener) error {
 // 注意：err != nil 代表建立第一个连接失败，但是仍然会启动服务，若想停止服务请调用Close()
 func (p *ConnPool) StartWithDialer(dialer Dialer, connNum int) (err error) {
 	p.side = client
-	p.running = true
 	go p.writer()
 	go p.receiver()
+	go p.retransmiter()
 	go p.timeoutTunnelCleaner(10 * time.Second)
 
 	conn, weight, err := dialer.Dial()
@@ -510,7 +578,6 @@ func (p *ConnPool) StartWithDialer(dialer Dialer, connNum int) (err error) {
 
 	go func() {
 		ticker := time.NewTicker(time.Second)
-		defer func() { p.running = false }()
 		for {
 			select {
 			case <-p.ctx.Done():
@@ -536,11 +603,8 @@ func (p *ConnPool) StartWithDialer(dialer Dialer, connNum int) (err error) {
 }
 
 // Close closes the listener.
-// Any blocked Accept operations will be unblocked and return errors.\
+// Any blocked Accept operations will be unblocked and return errors.
 func (p *ConnPool) Close() error {
-	if !p.running {
-		return errors.New("Not running")
-	}
 	p.tunnMap.Range(func(k, v interface{}) bool {
 		v.(*tunnInfo).Close()
 		p.tunnMap.Delete(k)
@@ -570,8 +634,22 @@ func (p *ConnPool) Addr() net.Addr {
 func (p *ConnPool) writer() {
 	for {
 		select {
-		case toSend := <-p.sendCh:
-			_, err := p.send(toSend)
+		case packet := <-p.sendCh:
+			if packet.Type == Connect || packet.Type == Data {
+				p.bufferLock.Lock()
+				_, exist := p.packetMap[packet.PacketID()]
+				if !exist {
+					ele := p.packetsBuffer.PushBack(&packetWithtime{mpxPacket: packet, time: time.Now()})
+					if p.packetsBuffer.Len() > p.maxBufferSize {
+						toDel := p.packetsBuffer.Front()
+						p.packetsBuffer.Remove(toDel)
+						delete(p.packetMap, toDel.Value.(*mpxPacket).PacketID())
+					}
+					p.packetMap[packet.PacketID()] = ele
+				}
+				p.bufferLock.Unlock()
+			}
+			_, err := p.send(packet.Pack())
 			if err != nil {
 				debug.Printf("send failed: %s", err)
 			}
@@ -584,7 +662,7 @@ func (p *ConnPool) writer() {
 }
 
 func (p *ConnPool) send(buf []byte) (int, error) {
-	if buf == nil || len(buf) == 0 {
+	if len(buf) == 0 {
 		return 0, errors.New("buffer is nil or empty")
 	}
 	conn := p.choseConnByWeight()
@@ -601,7 +679,7 @@ func (p *ConnPool) send(buf []byte) (int, error) {
 type tunnelWriter struct {
 	TunnID uint32
 	Seq    uint32
-	sendCh chan []byte
+	sendCh chan *mpxPacket
 	closed bool
 }
 
@@ -628,7 +706,7 @@ func (tw *tunnelWriter) Write(ctx context.Context, data []byte) (n int, err erro
 		copy(packet.Data, data)
 	}
 	select {
-	case tw.sendCh <- packet.Pack():
+	case tw.sendCh <- packet:
 	case <-ctx.Done():
 		return 0, syscall.ETIMEDOUT
 	}
@@ -652,7 +730,7 @@ func (tw *tunnelWriter) Close() (err error) {
 		Length: 0,
 		Data:   make([]byte, 0),
 	}
-	tw.sendCh <- packet.Pack()
+	tw.sendCh <- packet
 	tw.closed = true
 	return nil
 }

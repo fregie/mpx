@@ -20,6 +20,7 @@ const (
 	RST
 	Heartbeat
 	SetWeight
+	ACK
 )
 
 const (
@@ -49,6 +50,10 @@ func (p *mpxPacket) Pack() []byte {
 	return packed
 }
 
+func (p *mpxPacket) PacketID() uint64 {
+	return uint64(p.TunnID)<<32 | uint64(p.Seq)
+}
+
 func PacketFromReader(r io.Reader) (*mpxPacket, error) {
 	headerBuf := make([]byte, headerSize)
 	_, err := io.ReadFull(r, headerBuf)
@@ -64,7 +69,7 @@ func PacketFromReader(r io.Reader) (*mpxPacket, error) {
 		Checksum: binary.BigEndian.Uint16(headerBuf[16:]),
 	}
 	if p.Checksum != netstack.Checksum(headerBuf[:16], 0) {
-		return p, fmt.Errorf("Checksum error")
+		return p, fmt.Errorf("checksum error")
 	}
 	p.Data = make([]byte, p.Length)
 	if p.Length > 0 {
@@ -105,5 +110,17 @@ func NewSetWeightPacket(weight uint32) *mpxPacket {
 		Data:   make([]byte, 4),
 	}
 	binary.BigEndian.PutUint32(p.Data, weight)
+	return p
+}
+
+func NewAckPacket(tunnelID, seq, length uint32) *mpxPacket {
+	p := &mpxPacket{
+		Type:   ACK,
+		TunnID: tunnelID,
+		Seq:    seq,
+		Length: 4,
+		Data:   make([]byte, 4),
+	}
+	binary.BigEndian.PutUint32(p.Data, length)
 	return p
 }
