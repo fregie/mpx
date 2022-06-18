@@ -16,6 +16,38 @@
 
 ## 使用 mpx-tunnel
 mpx-tunnel使用多个TCP连接承载
+### 使用docker部署聚合2台服务区带宽
+假设我们有两台服务器`server-1`, `server-2`
+|   | 公网IP | 内网IP |
+|---|---|---|
+| server-1  | public-ip-1  | private-ip-1 |
+| server-2  | public-ip-2 | private-ip-2 |
+
+#### server-1 部署
+```bash
+docker run -d --restart=always --name=ssgo -p 2551:2551 -t niiv0832/go-shadowsocks2:latest -u -s 'ss://AEAD_CHACHA20_POLY1305:password@:2551'
+docker run -d --restart=always --name mpx -p 5512:5512 -e LISTEN_ADDR="0.0.0.0:5512" -e TARGET_ADDR="private-ip-1:2551" fregie/mpx:latest
+```
+#### server-2 部署
+```bash
+echo "net.ipv4.ip_forward = 1" >> /etc/sysctl.conf
+sysctl -p
+iptables -t nat -I POSTROUTING  -j MASQUERADE
+iptables -t nat -I PREROUTING -p tcp --dport 6666 -j DNAT --to-destination private-ip-1:5512
+iptables -t nat -I POSTROUTING -d private-ip-1 -p tcp --dport 5512 -j SNAT --to-source private-ip-2
+```
+
+#### 本地部署
+```bash
+docker run -d --restart=always --name mpx -p 5513:5513 -e LISTEN_ADDR="0.0.0.0:5513" -e SERVER_ADDR="public-ip-1:5512|1,public-ip-2:6666|1" fregie/mpx:latest
+```
+使用以下配置启动任意shadowsocks客户端
+```yaml
+server: 127.0.0.1
+port: 5513
+method: AEAD_CHACHA20_POLY1305
+password: password
+```
 
 ### 源码编译安装部署
 #### 安装
@@ -68,7 +100,7 @@ iptables -t nat -I POSTROUTING -d private-ip-1 -p tcp --dport 5512 -j SNAT --to-
 ```bash
 mpx-tunnel -listen 0.0.0.0:5513 -server "public-ip-1:5512|2,public-ip-2:6666|2" -p 4
 # 使用docker部署
-docker run -d --restart=always --name mpx -p 5512:5512 -e LISTEN_ADDR="0.0.0.0:5512" -e SERVER_ADDR="public-ip-1:5512|2,public-ip-2:6666" fregie/mpx:latest
+docker run -d --restart=always --name mpx -p 5512:5512 -e LISTEN_ADDR="0.0.0.0:5512" -e SERVER_ADDR="public-ip-1:5512|2,public-ip-2:6666|2" fregie/mpx:latest
 ```
 `-s`: 使用`,`分割不同服务端，`|`前为服务端地址`ip:port`,`|`之后为权重，会根据其权重来分配对应地址承载的带宽。例如你有一台30m和一台60m的服务器，那你应该将其权重配为`1:2`
 
