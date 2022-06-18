@@ -25,7 +25,7 @@ var (
 var (
 	MaxCachedNum             = 65535
 	defaultTunnelTimeout     = time.Second * 10
-	defaultPacketsBufferSize = 4096
+	defaultPacketsBufferSize = 65535
 	defaultRetransmitCount   = 1000
 	defaultRetransmitTimeout = 500 * time.Millisecond
 	debug                    = log.New(ioutil.Discard, "[MPX Debug] ", log.Ldate|log.Ltime|log.Lshortfile)
@@ -360,6 +360,7 @@ func (p *ConnPool) retransmiter() {
 			for ele := p.packetsBuffer.Front(); ele != nil; ele = ele.Next() {
 				pwt := ele.Value.(*packetWithtime)
 				if now.After(pwt.time.Add(p.retransmitTimeout)) {
+					pwt.time = now
 					toSend = append(toSend, ele)
 				}
 			}
@@ -389,33 +390,16 @@ func (p *ConnPool) receiver() {
 			}
 			switch packet.Type {
 			case Data:
-				fallthrough
-			case Connect:
 				ackPkt := NewAckPacket(packet.TunnID, packet.Seq, packet.Length)
 				p.sendCh <- ackPkt
 			case ACK:
-				toReSend := make([]*list.Element, 0)
 				p.bufferLock.Lock()
 				ackEle, ok := p.packetMap[packet.PacketID()]
 				if ok {
-					count := 0
-					for ele := ackEle.Prev(); ele != nil; ele = ele.Prev() {
-						count++
-						if count <= p.retransmitCount {
-							continue
-						}
-						toReSend = append(toReSend, ele)
-					}
 					p.packetsBuffer.Remove(ackEle)
 					delete(p.packetMap, packet.PacketID())
-					for _, ele := range toReSend {
-						p.packetsBuffer.MoveToBack(ele)
-					}
 				}
 				p.bufferLock.Unlock()
-				for _, ele := range toReSend {
-					p.sendCh <- ele.Value.(*packetWithtime).mpxPacket
-				}
 				continue
 			}
 			// 处理tunnel
@@ -635,17 +619,17 @@ func (p *ConnPool) writer() {
 	for {
 		select {
 		case packet := <-p.sendCh:
-			if packet.Type == Connect || packet.Type == Data {
+			if packet.Type == Data {
 				p.bufferLock.Lock()
 				_, exist := p.packetMap[packet.PacketID()]
 				if !exist {
 					ele := p.packetsBuffer.PushBack(&packetWithtime{mpxPacket: packet, time: time.Now()})
+					p.packetMap[packet.PacketID()] = ele
 					if p.packetsBuffer.Len() > p.maxBufferSize {
 						toDel := p.packetsBuffer.Front()
 						p.packetsBuffer.Remove(toDel)
 						delete(p.packetMap, toDel.Value.(*mpxPacket).PacketID())
 					}
-					p.packetMap[packet.PacketID()] = ele
 				}
 				p.bufferLock.Unlock()
 			}
